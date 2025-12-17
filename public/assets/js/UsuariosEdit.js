@@ -1,62 +1,40 @@
 //LLENA EL SELECT DE TIENDAS
 
-function CargarTienda() {
-    //console.log(e);
-    var IdEmpresa = $('#id_empresa').val();
-    console.log(IdEmpresa);
-    $.get(obtenertienda+ '/' + IdEmpresa, function(data) {
-        var old = $('#id_tienda').data('old') != '' ? $('#id_tienda').data('old') : '';
-        $('#id_tienda').empty();
-        $('#id_tienda').append('<option value="0">Seleccione la Tienda</option>');
-
-        $.each(data, function(fetch, tiendas) {
-            console.log(data);
-            for (i = 0; i < tiendas.length; i++) {
-                $('#id_tienda').append('<option value="' + tiendas[i].id_tienda + '"   ' + (old ==
-                    tiendas[i].id_tienda ? "selected" : "") + ' >'+ tiendas[i]
-                    .id_tienda + ' - ' + tiendas[i]
-                    .nombre + '</option>');
-            }
-        })
-
-    })
-}
-CargarTienda();
-$('#id_empresa').on('change', CargarTienda);
-
 
 
 
 
 function CargarTablaTiendas() {
-    var tienda = $("#id_tienda option:selected").text();
-    var idtienda =$('#id_tienda').val();
+    var dominio = $("#id_dominio option:selected").text();
+    var iddominio =$('#id_dominio').val();
 
     
-    if(idtienda== 0 || tienda=='')
+    if(iddominio== 0 || dominio=='')
         {
-            alert('DEBE SELECCIONAR UNA TIENDA');
+            alert('DEBE SELECCIONAR UN DOMINIO');
             return; 
         }
-    var ListaTienda = CapturarDatosTabla();
+    var ListaDominio = CapturarDatosTabla();
    
     
-    for (var i = 0; i < ListaTienda.length; i++) {
+    for (var i = 0; i < ListaDominio.length; i++) {
     
-      let IdTienda = String(ListaTienda[i].id_tienda).trim();
+      let Id_DOMINIO = String(ListaDominio[i].id_dominio).trim();
   
 
-        if (idtienda == IdTienda ) {
-            alert('LA TIENDA YA ESTA CARGADA, DEBE SELECCIONAR OTRA');
+        if (iddominio == Id_DOMINIO ) {
+            alert('EL DOMINIO YA ESTA CARGADO, DEBE SELECCIONAR OTRO');
             return; 
         }
     }
 
 
-        $("#tabla_tiendas>tbody").append(
+        $("#tabla_dominios>tbody").append(
             "<tr>"
-            + "<td id='id_tienda' style='display: none'>" + idtienda + "</td>"
-            + "<td id='nombre_tienda'>" + tienda.split('-')[1] + "</td>"
+            + "<td id='id_dominio_usuario' style='display: none'>" +' ' + "</td>"
+            + "<td id='id_dominio' style='display: none'>" + iddominio + "</td>"
+            + "<td id='nombre'>" +dominio.split('-')[0] + "</td>"
+            + "<td id='url'>" + dominio.split('-')[1] + "</td>"
           
           
             + "<th><button type='button' class='remove-item-btn bg-danger-focus bg-hover-danger-200 text-danger-600 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle borrar'> <iconify-icon icon='fluent:delete-24-regular' class='menu-icon'></iconify-icon></button></th></tr>"
@@ -75,22 +53,24 @@ function CargarTablaTiendas() {
 //OBTENER DATOS DE LA TABLA 
 function CapturarDatosTabla()
 {
-    let lista_tiendas = [];
+    let lista_dominios = [];
     
-    document.querySelectorAll('#tabla_tiendas tbody tr').forEach(function(e){
+    document.querySelectorAll('#tabla_dominios tbody tr').forEach(function(e){
         let fila = {
-            id_tienda: e.querySelector('#id_tienda').innerText,
-            nombre: e.querySelector('#nombre_tienda').innerText,
+            id_dominio_usuario: e.querySelector('#id_dominio_usuario').innerText,
+            id_dominio: e.querySelector('#id_dominio').innerText,
+            url: e.querySelector('#url').innerText,
+            nombre: e.querySelector('#nombre').innerText,
             
         };
 
-        lista_tiendas.push(fila);
+        lista_dominios.push(fila);
     });
 
-    $('#datos_tiendas').val(JSON.stringify(lista_tiendas)); //PASA DATOS DE LA TABLA A CAMPO OCULTO APRA ENVIAR POR POST
-    console.log(lista_tiendas)
+    $('#datos_tiendas').val(JSON.stringify(lista_dominios)); //PASA DATOS DE LA TABLA A CAMPO OCULTO APRA ENVIAR POR POST
+    console.log(lista_dominios)
 
-    return lista_tiendas;
+    return lista_dominios;
 
 }
 $(document).on('click', '.borrar', function(event) {

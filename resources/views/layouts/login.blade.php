@@ -51,14 +51,14 @@
 <section class="auth bg-base d-flex flex-wrap">  
     <div class="auth-left d-lg-block d-none">
         <div class="d-flex align-items-center flex-column h-100 justify-content-center">
-            <img src="assets/images/tecno.png" alt="">
+            <img src="assets/images/logo-idei.png" alt="">
         </div>
     </div>
     <div class="auth-right py-32 px-24 d-flex flex-column justify-content-center">
         <div class="max-w-464-px mx-auto w-100">
             <div>
                 <a href="index.html" class="mb-40 max-w-290-px">
-                    <img src="assets/images/tecno.png" alt="">
+                    <img src="assets/images/logo-idei-pequeño.png" alt="">
                 </a>
                 <h4 class="mb-12">Inicio de Sesion</h4>
 

@@ -55,38 +55,14 @@
   </button>
   <div>
     <a href="{{ url('/') }}" class="sidebar-logo">
-      <img src="{{ asset('assets/images/tecno.png') }}" alt="site logo" class="light-logo">
+      <img src="{{ asset('assets/images/IDEIWEB_300x110_ajustado.png') }}" alt="site logo" class="light-logo">
       <img src="{{ asset('assets/images/logo-light.png') }}" alt="site logo" class="dark-logo">
       <img src="{{ asset('assets/images/logo-ico.png') }}" alt="site logo" class="logo-icon">
 
     </a>
   </div>
    {{-- Selector de tienda del usuario --}}
-  @auth
-    @if(!empty($tiendasUsuario) && count($tiendasUsuario) > 0)
-      <div class="px-16 py-12 radius-8 panel-primary">
-        <form method="POST" action="{{ route('cambiar.tienda') }}"
-              class="d-flex flex-column align-items-start gap-2 w-100">
-          @csrf
-
-          <label for="tienda_id" class="text-sm fw-semibold mb-1 d-block text-white">
-            Tienda:
-          </label>
-
-          <select id="tienda_id" name="tienda_id"
-                  class="form-select  w-100 select-on-primary radius-8"
-                  onchange="this.form.submit()">
-            @foreach ($tiendasUsuario as $t)
-              <option value="{{ $t['id'] }}"
-                {{ (string)($tiendaActual ?? '') === (string)$t['id'] ? 'selected' : '' }}>
-                {{ $t['nombre'] }}
-              </option>
-            @endforeach
-          </select>
-        </form>
-      </div>
-    @endif
-  @endauth
+  
   <div class="sidebar-menu-area">
     <ul class="sidebar-menu" id="sidebar-menu">
       {{-- <li class="dropdown">
@@ -158,116 +134,8 @@
       
       
      
-      <li class="dropdown">
-        <a href="javascript:void(0)">
-          <iconify-icon icon="icon-park-outline:setting-two" class="menu-icon"></iconify-icon>
-          <span>Ajustes</span>
-        </a>
-        <ul class="sidebar-submenu">
-          {{-- <li>
-            <a href="{{ route('empresas.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Empresas</a>
-          </li>
-          <li>
-            <a href="{{ route('tiendas.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Tiendas</a>
-          </li>
-          <li>
-            <a href="{{ route('almacenes.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Almacen</a>
-          </li>
-          
-          <li>
-            <a href="{{ route('metodos_pagos.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Metodos de Pago</a>
-          </li> --}}
-
-
-
-          {{-- <li>
-            <a href="users-grid.html"><i class="ri-circle-fill circle-icon text-warning-main w-auto"></i> Users Grid</a>
-          </li>
-          <li>
-            <a href="add-user.html"><i class="ri-circle-fill circle-icon text-info-main w-auto"></i> Add User</a>
-          </li>
-          <li>
-            <a href="view-profile.html"><i class="ri-circle-fill circle-icon text-danger-main w-auto"></i> View
-              Profile</a>
-          </li>
-          <li>
-            <a href="users-role-permission.html"><i class="ri-circle-fill circle-icon text-info-main w-auto"></i> User
-              Role & Permission</a>
-          </li> --}}
-        </ul>
-      </li>
-      <li class="dropdown">
-        <a href="javascript:void(0)">
-          <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
-          <span>Compras</span>
-        </a>
-        <ul class="sidebar-submenu">
-          {{-- <li>
-            <a href="{{ route('proveedores.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Proveedores</a>
-          </li>
-          <li>
-            <a href="{{ route('comppedidos.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Pedidos</a>
-          </li>
-          <li>
-            <a href="{{ route('albaranes.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Albaranes</a>
-          </li> --}}
-         
-        </ul>
-      </li>
-      <li class="dropdown">
-        <a href="javascript:void(0)">
-          <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
-          <span>Ventas</span>
-        </a>
-        <ul class="sidebar-submenu">
-          {{-- <li>
-            <a href="{{ route('clientes.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Clientes</a>
-          </li>
-        
-          <li>
-            <a href="{{ route('pedidos.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Pedidos</a>
-          </li>
-         
-          <li>
-            <a href="{{ route('presupuestos.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Presupuestos</a>
-          </li> --}}
-
-        </ul>
-      </li>
-      <li class="dropdown">
-        <a href="javascript:void(0)">
-          <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
-          <span>Articulos</span>
-        </a>
-        <ul class="sidebar-submenu">
-          {{-- <li>
-            <a href="{{ route('articulos.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Articulos</a>
-          </li>
-          <li>
-            <a href="{{ route('categorias.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Categorias</a>
-          </li>
-          <li>
-            <a href="{{ route('unidades.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Unidades</a>
-          </li> --}}
-
-
-
-          {{-- <li>
-            <a href="users-grid.html"><i class="ri-circle-fill circle-icon text-warning-main w-auto"></i> Users Grid</a>
-          </li>
-          <li>
-            <a href="add-user.html"><i class="ri-circle-fill circle-icon text-info-main w-auto"></i> Add User</a>
-          </li>
-          <li>
-            <a href="view-profile.html"><i class="ri-circle-fill circle-icon text-danger-main w-auto"></i> View
-              Profile</a>
-          </li>
-          <li>
-            <a href="users-role-permission.html"><i class="ri-circle-fill circle-icon text-info-main w-auto"></i> User
-              Role & Permission</a>
-          </li> --}}
-        </ul>
-      </li>
+   
+   
       
       <li class="dropdown">
         <a href="javascript:void(0)">
@@ -275,7 +143,7 @@
           <span>Usuarios</span>
         </a>
         <ul class="sidebar-submenu">
-          {{-- <li>
+          <li>
             <a href="{{ route('usuarios.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Lista de Usuarios</a>
           </li>
           <li>
@@ -283,11 +151,9 @@
           </li>
           <li>
             <a href="{{ route('permisos.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Permisos</a>
-          </li> --}}
+          </li>
          
-          {{-- <li>
-            <a href="{{ route('metodos_pago.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Metodos de Pago</a>
-          </li> --}}
+         
 
 
           {{-- <li>
@@ -305,6 +171,18 @@
               Role & Permission</a>
           </li> --}}
         </ul>
+      </li>
+      <li>
+        <a href="{{ route('perfiles.index') }}">
+            <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
+            <span>Perfiles</span>
+        </a>
+      </li>
+      <li>
+        <a href="{{ route('dominios.index') }}">
+            <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
+            <span>Dominios</span>
+        </a>
       </li>
 
  
