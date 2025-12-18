@@ -127,9 +127,9 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     /**
      * Redactor: genera un borrador HTML (sin repetir títulos previos).
      */
-    private function promptRedactor(string $tipo, string $keyword, string $noRepetir): string
-    {
-        $base = "Devuelve SOLO HTML válido listo para WordPress.
+ private function promptRedactor(string $tipo, string $keyword, string $noRepetir): string
+{
+    $base = "Devuelve SOLO HTML válido.
 NO incluyas <!DOCTYPE>, <html>, <head>, <meta>, <title>, <body>.
 NO uses markdown. NO expliques nada.
 NO uses headings: Introducción, Conclusión, ¿Qué es...?
@@ -145,69 +145,114 @@ Aunque la keyword sea la misma, crea una versión totalmente distinta:
 - H2/H3 diferentes
 - orden distinto
 - ejemplos/argumentos diferentes
-- evita frases tipo: 'en este artículo veremos...' y definiciones de diccionario.";
+- evita frases tipo: 'en este artículo veremos...'.";
 
-        if ($tipo === 'post') {
-            return "{$base}
+    return "{$base}
 
-Crea un POST SEO en español sobre: {$keyword}
+Keyword objetivo: {$keyword}
+Tipo: {$tipo}
 
-Estructura mínima:
-- 1 <h1> (único y atractivo)
-- 6 a 9 <h2> (no genéricos)
-- varios <h3> cuando aporte profundidad
-- Listas <ul><li> cuando aplique
-- FAQ (2-5)
-- CTA final en <p><strong>...</strong></p>
+" . $this->nictorysContract() . "
 
-Devuelve SOLO HTML.";
-        }
+INSTRUCCIONES EXTRA:
+- El <h1> debe ir dentro del HERO (hero-slider).
+- Mantén la estructura HTML de cada sección como la plantilla (containers, rows, cols, grids).
+- CTAs: al inicio (hero), mitad (cta-section-s2) y cierre (última sección).
+- FAQ: inclúyela dentro de la sección que mejor encaje (por ejemplo dentro de about o why-choose-us) usando <h3> + <ul><li> o <div>.
 
-        // page/landing
-        return "{$base}
-
-Crea una PÁGINA/LANDING SEO en español para: {$keyword}
-
-Estructura mínima:
-- 1 <h1> (único y potente)
-- 8 a 12 <h2> orientados a conversión (beneficios, servicios, proceso, objeciones, FAQ, CTA)
-- CTA al inicio, mitad y final
-- FAQ (3-6)
-- Usa <div> si ayuda a maquetar (sin CSS, solo estructura)
-
-Devuelve SOLO HTML.";
-    }
+Devuelve SOLO el HTML.";
+}
 
     /**
      * Auditor: mejora el borrador y devuelve HTML final.
      */
-    private function promptAuditorHtml(string $tipo, string $keyword, string $draftHtml, string $noRepetir): string
-    {
-        return "Eres un consultor SEO senior. Tu tarea es AUDITAR y MEJORAR el contenido entregado y devolver UNA VERSIÓN FINAL.
+  private function promptAuditorHtml(string $tipo, string $keyword, string $draftHtml, string $noRepetir): string
+{
+    return "Eres un consultor SEO senior. Tu tarea es AUDITAR y MEJORAR el contenido y devolver UNA VERSIÓN FINAL.
 
-Devuelve SOLO HTML válido listo para WordPress.
+Devuelve SOLO HTML válido.
 NO incluyas <!DOCTYPE>, <html>, <head>, <meta>, <title>, <body>.
 NO uses markdown.
 NO expliques nada.
-NO uses headings: Introducción, Conclusión, ¿Qué es...?
-NO uses casos de éxito ni testimonios.
-NO uses 'guía práctica' ni variantes.
+No headings: Introducción, Conclusión, ¿Qué es...?
+No casos de éxito ni testimonios reales.
+No 'guía práctica' ni variantes.
 
 Títulos ya usados (NO repetir ni hacer muy similares):
 {$noRepetir}
 
+DEBES RESPETAR este contrato de estructura/clases y el wrapper:
+" . $this->nictorysContract() . "
+
 Objetivo:
-- Mejorar intención de búsqueda, profundidad semántica y estructura
-- Reducir relleno y repetición
-- H2/H3 más específicos (menos genéricos)
-- Mejorar gancho inicial
-- Añadir FAQ si falta o mejorarla
-- CTA final breve y profesional
+- Mejorar intención de búsqueda y conversión
+- Evitar repetición y relleno
+- H2/H3 más específicos
+- CTA más claro
+- Mantener 1 solo <h1> (en hero)
 
 Tipo: {$tipo}
-Keyword principal: {$keyword}
+Keyword: {$keyword}
 
-HTML A MEJORAR (reescribe y devuelve el HTML final):
+HTML A MEJORAR (reescribe y devuelve HTML final):
 {$draftHtml}";
-    }
+}
+
+
+
+
+
+
+
+    private function nictorysContract(): string
+{
+    return <<<TXT
+DEVUELVE SOLO HTML (contenido del post/page). NO incluyas <!DOCTYPE>, <html>, <head>, <body>, <script>, <link>, <style>, header, footer.
+
+OBLIGATORIO: envuelve TODO en:
+<div class="nictorys-content"> ... </div>
+
+Usa EXACTAMENTE estas secciones y clases (en este orden):
+1) <section class="hero-slider hero-style-2"> ... (AQUÍ va el ÚNICO <h1>)
+   - Debe incluir .swiper-container, .swiper-wrapper, .swiper-slide, y dentro .slide-inner.slide-bg-image con data-background="assets/images/slider/slide-1.jpg"
+   - Incluye 2 CTAs con clases theme-btn y theme-btn-s2
+
+2) <section class="features-section-s2"> ... (4 features .grid)
+
+3) <section class="about-us-section-s2 section-padding p-t-0"> ...
+   - Incluye .img-holder y .about-details, y lista <ul><li>...
+
+4) <section class="services-section-s2 section-padding" id="services"> ...
+   - 6 cards .grid con .img-holder + .details + icon <i class="fi ..."></i>
+
+5) <section class="contact-section section-padding" id="contact"> ...
+   - Mantén estructura de formulario similar (inputs + textarea), action "#"
+
+6) <section class="cta-section-s2"> ... (CTA fuerte)
+
+7) <section class="latest-projects-section-s2 section-padding"> ...
+   - 6 items .grid con imagen + título
+
+8) <section class="why-choose-us-section section-padding p-t-0"> ...
+   - skills con progress-bar data-percent
+
+9) <section class="team-section section-padding p-t-0"> ... (4 miembros)
+
+10) <section class="testimonials-section section-padding"> ...
+   - PROHIBIDO testimonios reales, casos de éxito o “clientes dijeron”.
+   - Usa esta sección como "Garantías/Compromisos" (2 bloques tipo quote pero sin personas reales)
+
+11) <section class="blog-section section-padding"> ...
+   - 3 entradas sugeridas (títulos, fecha, extracto)
+
+REGLAS DE CONTENIDO:
+- Español natural, orientado a conversión.
+- No headings genéricos: “Introducción”, “Conclusión”, “¿Qué es…?”
+- No definiciones estilo diccionario.
+- No “guía práctica” ni variantes.
+- Nada de Lorem ipsum.
+- Enlaces siempre href="#".
+- Imágenes siempre con rutas tipo assets/images/... (tu plugin las reescribe).
+TXT;
+}
 }
