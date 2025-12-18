@@ -45,6 +45,7 @@
               <option value="">Tipo (todos)</option>
               <option value="post" {{ ($tipo==='post')?'selected':'' }}>post</option>
               <option value="page" {{ ($tipo==='page')?'selected':'' }}>page</option>
+              
             </select>
           </div>
 
@@ -56,6 +57,8 @@
               <option value="generado" {{ ($estatus==='generado')?'selected':'' }}>generado</option>
               <option value="publicado" {{ ($estatus==='publicado')?'selected':'' }}>publicado</option>
               <option value="error" {{ ($estatus==='error')?'selected':'' }}>error</option>
+              <option value="programado" {{ ($estatus==='programado')?'selected':'' }}>programado</option>
+
             </select>
           </div>
 
@@ -107,6 +110,7 @@
                       'en_proceso' => 'bg-warning-focus text-warning-600 border border-warning-main',
                       'pendiente' => 'bg-secondary-focus text-secondary-600 border border-secondary-main',
                       'error' => 'bg-danger-focus text-danger-600 border border-danger-main',
+                      'programado' => 'bg-info-focus text-info-600 border border-info-main',
                       default => 'bg-secondary-focus text-secondary-600 border border-secondary-main'
                     };
                   @endphp
@@ -137,7 +141,7 @@
                       <button type="submit"
                         class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle border-0"
                         title="Publicar"
-                        {{ in_array($it->estatus, ['publicado','en_proceso']) ? 'disabled' : '' }}>
+                        {{ in_array($it->estatus, ['publicado','en_proceso','programado']) ? 'disabled' : '' }}>
                         <iconify-icon icon="mdi:publish" class="menu-icon"></iconify-icon>
                       </button>
                     </form>
@@ -146,7 +150,7 @@
                       title="Programar"
                       data-id="{{ $it->id_dominio_contenido_detalle }}"
                       data-title="{{ e($it->title ?: '(Sin título)') }}"
-                      {{ in_array($it->estatus, ['publicado','en_proceso']) ? 'disabled' : '' }}>
+                      {{ in_array($it->estatus, ['publicado','en_proceso','programado']) ? 'disabled' : '' }}>
                       <iconify-icon icon="mdi:calendar-clock" class="menu-icon"></iconify-icon>
                     </button>
                   </div>

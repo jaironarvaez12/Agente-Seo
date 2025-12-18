@@ -672,7 +672,7 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     $it  = Dominios_Contenido_DetallesModel::findOrFail($detalle);
 
     $request->validate([
-        'schedule_at' => ['required', 'date'],
+        'schedule_at' => ['required'], // viene como datetime-local
     ]);
 
     $it->estatus = 'en_proceso';
@@ -683,23 +683,24 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
         $secret = (string) env('WP_WEBHOOK_SECRET');
         if ($secret === '') throw new \RuntimeException('WP_WEBHOOK_SECRET no configurado en .env');
 
+        // datetime-local -> Carbon en TZ de tu APP -> UTC ISO8601
+        $raw = (string)$request->input('schedule_at'); // ej: 2025-12-19T10:30
+        $dtLocal = Carbon::createFromFormat('Y-m-d\TH:i', $raw, config('app.timezone'));
+        $dtUtcIso = $dtLocal->copy()->setTimezone('UTC')->toIso8601String(); // 2025-12-19T16:30:00+00:00
+
         $wpBase = rtrim((string)$dom->url, '/');
         $urlRest = $wpBase . '/wp-json/lws/v1/upsert';
         $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
 
         $type = ($it->tipo === 'page') ? 'page' : 'post';
 
-        // schedule_at: viene del input datetime-local (ej: 2025-12-19T10:30)
-        // lo normalizamos a "Y-m-d H:i:s"
-        $scheduleAt = str_replace('T', ' ', (string)$request->input('schedule_at'));
-
         $payload = [
             'type'        => $type,
             'wp_id'       => $it->wp_id ?: null,
             'title'       => $it->title ?: ($it->keyword ?: 'Sin título'),
             'content'     => $it->contenido_html ?: '',
-            'status'      => 'future', // el plugin igual lo valida por schedule_at
-            'schedule_at' => $scheduleAt,
+            'status'      => 'future',
+            'schedule_at' => $dtUtcIso, // ✅ con zona
         ];
 
         $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
@@ -713,7 +714,6 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
         ];
 
         $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlRest, ['body' => $body]);
-
         if (in_array($resp->status(), [404, 405], true)) {
             $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlFallback, ['body' => $body]);
         }
@@ -728,8 +728,16 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
             return back()->with('error', 'No se pudo programar: ' . $msg);
         }
 
-        // OK: el WP quedará en future
-        $it->estatus = 'generado'; // o crea un estado "programado" si quieres
+        // ✅ ESTATUS en Laravel según lo que devolvió WP
+        $wpStatus = (string)($json['status'] ?? '');
+        if ($wpStatus === 'future') {
+            $it->estatus = 'programado';
+        } elseif ($wpStatus === 'publish') {
+            $it->estatus = 'publicado';
+        } else {
+            $it->estatus = 'generado';
+        }
+
         $it->wp_id = (int)($json['wp_id'] ?? 0) ?: $it->wp_id;
         $it->wp_link = (string)($json['link'] ?? '');
         $it->save();
