@@ -586,79 +586,76 @@ public function ContenidoGenerado(Request $request, string $IdDominio)
 
 
 
-   public function publicar($dominio, int $detalle, WordpressService $wp): RedirectResponse
+   public function publicar($dominio, int $detalle): RedirectResponse
 {
     $dom = DominiosModel::findOrFail($dominio);
     $it  = Dominios_Contenido_DetallesModel::findOrFail($detalle);
 
-    // Opcional: validar pertenencia
-    // if ($it->id_dominio !== $dom->id_dominio) abort(403);
-
-    // Marcar en proceso
     $it->estatus = 'en_proceso';
     $it->error = null;
     $it->save();
 
     try {
-        // 1) Validar usuario en WP (sin dd)
-        $me = $wp->me($dom);
-
-        // Si WP devolvió error estructurado
-        if (isset($me['code'], $me['message'])) {
-            $it->estatus = 'error';
-            $it->error = $me['message'] ?? 'No se pudo validar el usuario en WordPress';
-            $it->save();
-            return back()->with('error', 'No se pudo publicar: ' . $it->error);
+        $secret = (string) env('WP_WEBHOOK_SECRET'); // DEBE ser el mismo que el plugin
+        if ($secret === '') {
+            throw new \RuntimeException('WP_WEBHOOK_SECRET no configurado en .env');
         }
 
-        $tipoWp = ($it->tipo === 'page') ? 'pages' : 'posts';
+        $wpBase = rtrim((string)$dom->url, '/');
 
-        // 2) Determinar status según capabilities
-        $caps = $me['capabilities'] ?? [];
+        // Endpoint principal (REST del plugin)
+        $urlRest = $wpBase . '/wp-json/lws/v1/upsert';
+        // Fallback si wp-json está bloqueado
+        $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
 
-        if ($tipoWp === 'posts') {
-            $canCreate  = !empty($caps['edit_posts']);
-            $canPublish = !empty($caps['publish_posts']);
-        } else {
-            $canCreate  = !empty($caps['edit_pages']);
-            $canPublish = !empty($caps['publish_pages']);
+        // Decide tipo + status
+        $type = ($it->tipo === 'page') ? 'page' : 'post';
+
+        // Si quieres programar: manda schedule_at ISO (ej: 2025-12-19 10:00:00)
+        // Si no, publica normal.
+        $payload = [
+            'type'       => $type,
+            'wp_id'      => $it->wp_id ?: null, // si existe, actualiza
+            'title'      => $it->title ?: ($it->keyword ?: 'Sin título'),
+            'content'    => $it->contenido_html ?: '',
+            'status'     => 'publish', // o 'draft' si quieres primero borrador
+            // 'schedule_at' => '2025-12-19 10:00:00',
+        ];
+
+        $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
+        $ts = time();
+        $sig = hash_hmac('sha256', $ts . '.' . $body, $secret);
+
+        $headers = [
+            'Content-Type' => 'application/json',
+            'X-Timestamp'  => (string)$ts,
+            'X-Signature'  => $sig,
+        ];
+
+        $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlRest, ['body' => $body]);
+
+        // fallback si REST no existe / bloqueado
+        if (in_array($resp->status(), [404, 405], true)) {
+            $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlFallback, ['body' => $body]);
         }
 
-        if (!$canCreate) {
+        $json = $resp->json();
+
+        if (!$resp->ok() || !is_array($json) || empty($json['ok'])) {
+            $msg = is_array($json) ? ($json['message'] ?? 'Error desconocido') : ('HTTP ' . $resp->status());
             $it->estatus = 'error';
-            $it->error = 'El usuario de WordPress no tiene permisos para crear ' . ($tipoWp === 'posts' ? 'entradas' : 'páginas') . '.';
+            $it->error = $msg;
             $it->save();
-            return back()->with('error', 'No se pudo publicar: ' . $it->error);
-        }
-
-        // Si no puede publicar, lo mandamos a draft
-        $statusWp = $canPublish ? 'publish' : 'draft';
-
-        // 3) Publicar/crear
-        $resp = $wp->upsert($dom, $tipoWp, [
-            'title'   => $it->title ?: ($it->keyword ?: 'Sin título'),
-            'content' => $it->contenido_html ?: '',
-            'status'  => $statusWp,
-        ], $it->wp_id ?? null);
-
-        if (isset($resp['code'], $resp['message'])) {
-            $it->estatus = 'error';
-            $it->error = $resp['message'] ?? 'Error desconocido';
-            $it->save();
-            return back()->with('error', 'No se pudo publicar: ' . $it->error);
+            return back()->with('error', 'No se pudo publicar: ' . $msg);
         }
 
         // OK
-        $it->estatus = $canPublish ? 'publicado' : 'generado'; // o "borrador" si tienes ese estatus
-        if (isset($resp['id']))   $it->wp_id = (int)$resp['id'];
-        if (isset($resp['link'])) $it->wp_link = (string)$resp['link'];
+        $it->estatus = (($json['status'] ?? '') === 'publish') ? 'publicado' : 'generado';
+        $it->wp_id = (int)($json['wp_id'] ?? 0) ?: $it->wp_id;
+        $it->wp_link = (string)($json['link'] ?? '');
         $it->save();
 
-        return back()->with('exito', $canPublish
-            ? 'Contenido publicado correctamente en WordPress.'
-            : 'Contenido creado en WordPress como BORRADOR (el usuario no puede publicar).'
-        );
-
+        return back()->with('exito', 'Contenido enviado y publicado en WordPress.');
     } catch (\Throwable $e) {
         $it->estatus = 'error';
         $it->error = $e->getMessage();
