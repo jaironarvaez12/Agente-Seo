@@ -131,7 +131,7 @@
                     <div class="d-flex align-items-center">
                       <div class="flex-grow-1">
                         <span class="text-md mb-0 fw-normal text-secondary-light">
-                          {!! $p['title']['rendered'] ?? 'Sin título' !!}
+                      {!! data_get($p, 'title.rendered', 'Sin título') !!}
                         </span>
                         @if(!empty($p['slug']))
                           <div class="text-xs text-secondary-light">{{ $p['slug'] }}</div>
@@ -200,7 +200,7 @@
                     <div class="d-flex align-items-center">
                       <div class="flex-grow-1">
                         <span class="text-md mb-0 fw-normal text-secondary-light">
-                          {!! $pg['title']['rendered'] ?? 'Sin título' !!}
+                       {!! data_get($pg, 'title.rendered', 'Sin título') !!}
                         </span>
                         @if(!empty($pg['slug']))
                           <div class="text-xs text-secondary-light">{{ $pg['slug'] }}</div>

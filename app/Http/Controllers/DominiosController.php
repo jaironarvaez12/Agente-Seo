@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Crypt;
 use App\Services\WordpressService;
 use Illuminate\Support\Facades\Http;
 use App\Jobs\GenerarContenidoKeywordJob;
-
+use Illuminate\Http\RedirectResponse;
 class DominiosController extends Controller
 {
     /**
@@ -53,7 +53,8 @@ class DominiosController extends Controller
                     'url' =>    $request['url'],
                     'nombre' =>strtoupper($request['nombre']),
                     'estatus' =>strtoupper('SI'),
-                  
+                      'usuario' => $request['usuario'],
+                      'password'=> Crypt::encryptString($request->input('password'))
                 ]);
             });
  
@@ -179,19 +180,46 @@ public function Crearcontenido(string $IdDominio)
 
         
     }
-    public function verWp($id, WordpressService $wp)
-    {
-            $dominio = DominiosModel::findOrFail($id);
+public function verWp($id, WordpressService $wp)
+{
+    $dominio = DominiosModel::findOrFail($id);
 
-            // publicados + borradores + programados
-            $posts = $wp->posts($dominio, ['publish','draft','future'], 50, 1);
-        $pages = $wp->pages($dominio, ['publish','draft','future'], 50, 1);
+    // Puedes cambiar estos defaults
+    $perPagePosts = (int) request('per_posts', 50);
+    $perPagePages = (int) request('per_pages', 50);
+    $pagePosts    = (int) request('page_posts', 1);
+    $pagePages    = (int) request('page_pages', 1);
 
-        // ✅ Totales por estado
-        $countPosts = $wp->countByStatus($dominio, 'posts');
-        $countPages = $wp->countByStatus($dominio, 'pages');
-        return view('Dominios.DominioContenido', compact('dominio','posts','pages','countPosts','countPages'));
-    }
+    // Si quieres mostrar "todos los estados" en la tabla, usa este array.
+    // Si solo quieres drafts, deja ['draft'].
+    $statusesPosts = request('st_posts')
+        ? array_filter(explode(',', request('st_posts')))
+        : ['publish','draft','future','pending','private'];
+
+    $statusesPages = request('st_pages')
+        ? array_filter(explode(',', request('st_pages')))
+        : ['publish','draft','future','pending','private'];
+
+    // Listados
+    $posts = $wp->posts($dominio, $statusesPosts, $perPagePosts, $pagePosts);
+    $pages = $wp->pages($dominio, $statusesPages, $perPagePages, $pagePages);
+
+    // Totales por estado (para las tarjetas)
+    $countPosts = $wp->countByStatus($dominio, 'posts', ['publish','draft','future','pending','private']);
+    $countPages = $wp->countByStatus($dominio, 'pages', ['publish','draft','future','pending','private']);
+
+    return view('Dominios.DominioContenido', compact(
+        'dominio',
+        'posts',
+        'pages',
+        'countPosts',
+        'countPages',
+        'perPagePosts',
+        'perPagePages',
+        'pagePosts',
+        'pagePages'
+    ));
+}
 
 
 
@@ -495,4 +523,91 @@ public function ContenidoGenerado(Request $request, string $IdDominio)
 
     }
 
+
+
+
+
+
+
+   public function publicar($dominio, int $detalle, WordpressService $wp): RedirectResponse
+{
+    $dom = DominiosModel::findOrFail($dominio);
+    $it  = Dominios_Contenido_DetallesModel::findOrFail($detalle);
+
+    // Opcional: validar pertenencia
+    // if ($it->id_dominio !== $dom->id_dominio) abort(403);
+
+    // Marcar en proceso
+    $it->estatus = 'en_proceso';
+    $it->error = null;
+    $it->save();
+
+    try {
+        // 1) Validar usuario en WP (sin dd)
+        $me = $wp->me($dom);
+
+        // Si WP devolvió error estructurado
+        if (isset($me['code'], $me['message'])) {
+            $it->estatus = 'error';
+            $it->error = $me['message'] ?? 'No se pudo validar el usuario en WordPress';
+            $it->save();
+            return back()->with('error', 'No se pudo publicar: ' . $it->error);
+        }
+
+        $tipoWp = ($it->tipo === 'page') ? 'pages' : 'posts';
+
+        // 2) Determinar status según capabilities
+        $caps = $me['capabilities'] ?? [];
+
+        if ($tipoWp === 'posts') {
+            $canCreate  = !empty($caps['edit_posts']);
+            $canPublish = !empty($caps['publish_posts']);
+        } else {
+            $canCreate  = !empty($caps['edit_pages']);
+            $canPublish = !empty($caps['publish_pages']);
+        }
+
+        if (!$canCreate) {
+            $it->estatus = 'error';
+            $it->error = 'El usuario de WordPress no tiene permisos para crear ' . ($tipoWp === 'posts' ? 'entradas' : 'páginas') . '.';
+            $it->save();
+            return back()->with('error', 'No se pudo publicar: ' . $it->error);
+        }
+
+        // Si no puede publicar, lo mandamos a draft
+        $statusWp = $canPublish ? 'publish' : 'draft';
+
+        // 3) Publicar/crear
+        $resp = $wp->upsert($dom, $tipoWp, [
+            'title'   => $it->title ?: ($it->keyword ?: 'Sin título'),
+            'content' => $it->contenido_html ?: '',
+            'status'  => $statusWp,
+        ], $it->wp_id ?? null);
+
+        if (isset($resp['code'], $resp['message'])) {
+            $it->estatus = 'error';
+            $it->error = $resp['message'] ?? 'Error desconocido';
+            $it->save();
+            return back()->with('error', 'No se pudo publicar: ' . $it->error);
+        }
+
+        // OK
+        $it->estatus = $canPublish ? 'publicado' : 'generado'; // o "borrador" si tienes ese estatus
+        if (isset($resp['id']))   $it->wp_id = (int)$resp['id'];
+        if (isset($resp['link'])) $it->wp_link = (string)$resp['link'];
+        $it->save();
+
+        return back()->with('exito', $canPublish
+            ? 'Contenido publicado correctamente en WordPress.'
+            : 'Contenido creado en WordPress como BORRADOR (el usuario no puede publicar).'
+        );
+
+    } catch (\Throwable $e) {
+        $it->estatus = 'error';
+        $it->error = $e->getMessage();
+        $it->save();
+
+        return back()->with('error', 'Error publicando en WordPress: ' . $e->getMessage());
+    }
+}
 }

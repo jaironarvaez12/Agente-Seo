@@ -127,6 +127,20 @@
                       data-error="{{ e($it->error ?? '') }}">
                       <iconify-icon icon="majesticons:eye-line" class="menu-icon"></iconify-icon>
                     </button>
+
+                    {{-- Publicar --}}
+                    <form method="POST"
+                          action="{{ route('dominios.contenido.publicar', [$IdDominio, $it->id_dominio_contenido_detalle]) }}"
+                          class="m-0 form-publish">
+                      @csrf
+
+                      <button type="submit"
+                        class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle border-0"
+                        title="Publicar"
+                        {{ in_array($it->estatus, ['publicado','en_proceso']) ? 'disabled' : '' }}>
+                        <iconify-icon icon="mdi:publish" class="menu-icon"></iconify-icon>
+                      </button>
+                    </form>
                   </div>
                 </td>
               </tr>
@@ -212,6 +226,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
       modal.show();
     });
+  });
+});
+</script>
+<script>
+  document.querySelectorAll('.form-publish').forEach(f => {
+  f.addEventListener('submit', (e) => {
+    if (!confirm('¿Seguro que deseas PUBLICAR este contenido en WordPress?')) {
+      e.preventDefault();
+      return;
+    }
+    const btn = f.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
   });
 });
 </script>

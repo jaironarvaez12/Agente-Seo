@@ -61,7 +61,7 @@
                                     <label for="nombre" class="form-label fw-semibold text-primary-light text-sm mb-8">
                                        Contraseña<span class="text-danger-600">*</span>
                                     </label>
-                                      <input type="password" class="form-control radius-8" id="contraseña" name="contraseña" placeholder="Ingrese su contraseña ">
+                                      <input type="password" class="form-control radius-8" id="password" name="password" placeholder="Ingrese su contraseña ">
                                 </div>
 
                                 <div class="d-flex align-items-center justify-content-center gap-3 mt-4">

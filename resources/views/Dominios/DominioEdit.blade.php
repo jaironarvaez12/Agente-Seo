@@ -30,7 +30,7 @@
                     <div class="card border">
                         <div class="card-body">
 
-                           <form method="POST" action="{{ route('dominios.update', $dominios->id_dominio) }}">
+                           <form method="POST" action="{{ route('dominios.update', $dominio->id_dominio) }}">
                                  @csrf 
                                 @method('put')
 
@@ -39,7 +39,7 @@
                                        Nombre del Dominio<span class="text-danger-600">*</span>
                                     </label>
                                     <input type="text" class="form-control radius-8" id="nombre" name="nombre"
-                                        value=" {{ old('name', $dominios->nombre ?? '') }}"
+                                        value=" {{ old('name', $dominio->nombre ?? '') }}"
                                         placeholder="Ej: IdeiWeb.com" readonly>
                                 </div>
 
@@ -48,14 +48,14 @@
                                         Url
                                     </label>
                                     <textarea class="form-control radius-8" id="url" name="url" readonly
-                                            rows="2" placeholder="https://ideiweb.com/">{{ old('url', $dominios->url ?? '') }}</textarea >
+                                            rows="2" placeholder="https://ideiweb.com/">{{ old('url', $dominio->url ?? '') }}</textarea >
                                 </div>
                                  <div class="mb-20">
                                     <label for="nombre" class="form-label fw-semibold text-primary-light text-sm mb-8">
                                        Usuario<span class="text-danger-600">*</span>
                                     </label>
                                     <input type="text" class="form-control radius-8" id="usuario" name="usuario"
-                                       value=" {{ old('usuario', $dominios->usuario ?? '') }}"
+                                       value=" {{ old('usuario', $dominio->usuario ?? '') }}"
                                         >
                                 </div>
                                  <div class="mb-20">

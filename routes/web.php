@@ -30,7 +30,8 @@ Route::group(['middleware' => 'auth'], function(){
 
 
 
-
+Route::post('dominios/{dominio}/contenido/{detalle}/publicar', [App\Http\Controllers\DominiosController::class, 'publicar'])
+  ->name('dominios.contenido.publicar');
 
     //PERFILES
     Route::resource('perfiles','App\Http\Controllers\PerfilesController');

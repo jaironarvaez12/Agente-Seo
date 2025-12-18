@@ -39,5 +39,7 @@ class Dominios_Contenido_DetallesModel extends Model
 
         'draft_html',
         'modelo',
+        'wp_id',
+        'wp_link'
     ];
 }

@@ -32,12 +32,12 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             'tipo' => $this->tipo,
             'keyword' => $this->keyword,
             'estatus' => 'en_proceso',
-            'modelo' => env('OPENAI_MODEL', 'gpt-5-mini'),
+            'modelo' => env('DEEPSEEK_MODEL', 'deepseek-chat'),
         ]);
 
         try {
-            $apiKey = env('OPENAI_API_KEY');
-            $model  = env('OPENAI_MODEL', 'gpt-5-mini');
+            $apiKey = env('DEEPSEEK_API_KEY');
+            $model  = env('DEEPSEEK_MODEL', 'deepseek-chat');
 
             // ✅ Títulos anteriores para NO repetir (limitado para no inflar el prompt)
             $existentes = Dominios_Contenido_DetallesModel::where('id_dominio_contenido', (int)$this->idDominioContenido)
@@ -51,11 +51,11 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             // 1) Redactor -> HTML borrador
             $draftPrompt = $this->promptRedactor($this->tipo, $this->keyword, $noRepetir);
-            $draftHtml   = $this->openaiText($apiKey, $model, $draftPrompt);
+            $draftHtml   = $this->deepseekText($apiKey, $model, $draftPrompt);
 
             // 2) Auditor -> HTML final mejorado
             $auditPrompt = $this->promptAuditorHtml($this->tipo, $this->keyword, $draftHtml, $noRepetir);
-            $finalHtml   = $this->openaiText($apiKey, $model, $auditPrompt);
+            $finalHtml   = $this->deepseekText($apiKey, $model, $auditPrompt);
 
             // Title desde H1
             $title = null;
@@ -87,41 +87,37 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     }
 
     /**
-     * Llamada a OpenAI Responses API y extracción de texto.
+     * Llamada a DeepSeek (OpenAI-compatible) y extracción de texto.
      */
-    private function openaiText(string $apiKey, string $model, string $prompt): string
+    private function deepseekText(string $apiKey, string $model, string $prompt): string
     {
         $resp = Http::withHeaders([
                 'Authorization' => 'Bearer ' . $apiKey,
                 'Accept' => 'application/json',
+                'Content-Type' => 'application/json',
             ])
             ->connectTimeout(15)
             ->timeout(150)
             ->retry(1, 700)
-            ->post('https://api.openai.com/v1/responses', [
+            ->post('https://api.deepseek.com/v1/chat/completions', [
                 'model' => $model,
-                'input' => $prompt,
+                'messages' => [
+                    ['role' => 'user', 'content' => $prompt],
+                ],
+                // opcional:
+                // 'temperature' => 0.8,
             ]);
 
         if (!$resp->successful()) {
-            throw new \RuntimeException("OpenAI error {$resp->status()}: {$resp->body()}");
+            throw new \RuntimeException("DeepSeek error {$resp->status()}: {$resp->body()}");
         }
 
         $data = $resp->json();
 
-        $text = '';
-        foreach (($data['output'] ?? []) as $item) {
-            foreach (($item['content'] ?? []) as $c) {
-                if (($c['type'] ?? '') === 'output_text') {
-                    $text .= ($c['text'] ?? '');
-                }
-            }
-        }
-
-        $text = trim($text);
+        $text = trim((string)($data['choices'][0]['message']['content'] ?? ''));
 
         if ($text === '') {
-            throw new \RuntimeException("OpenAI returned empty text.");
+            throw new \RuntimeException("DeepSeek returned empty text.");
         }
 
         return $text;
