@@ -262,7 +262,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // default: +30min
       const now = new Date();
-      now.setMinutes(now.getMinutes() + 30);
+      now.setMinutes(now.getMinutes() + 10);
       const pad = n => String(n).padStart(2,'0');
       const val = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
       scheduleAt.value = val;
