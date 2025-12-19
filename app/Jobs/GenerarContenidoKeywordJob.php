@@ -15,7 +15,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    // ✅ En prod 2 llamadas + red puede pasar 5 min. Sube.
     public $timeout = 900;
     public $tries = 1;
 
@@ -45,6 +44,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 throw new \RuntimeException('DEEPSEEK_API_KEY no configurado');
             }
 
+            // Evitar títulos repetidos
             $existentes = Dominios_Contenido_DetallesModel::where('id_dominio_contenido', (int)$this->idDominioContenido)
                 ->whereNotNull('title')
                 ->orderByDesc('id_dominio_contenido_detalle')
@@ -54,43 +54,48 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             $noRepetir = implode(' | ', array_filter($existentes));
 
-            // 1) Redactor: genera ya con estructura Nictorys
-            $draftPrompt = $this->promptRedactor($this->tipo, $this->keyword, $noRepetir);
-            $draftHtml   = $this->deepseekText($apiKey, $model, $draftPrompt, maxTokens: 4500);
+            // 1) Copy como JSON (no HTML libre)
+            $copyPrompt = $this->promptCopyElementor($this->tipo, $this->keyword, $noRepetir);
+            $copyRaw    = $this->deepseekText($apiKey, $model, $copyPrompt, maxTokens: 1800);
 
-            $draftHtml = $this->ensureNictorysWrappers($draftHtml);
+            $copy = $this->parseJsonStrict($copyRaw);
+            $this->validateCopySchema($copy);
 
-            // 2) Auditor SOLO si hace falta (ahorra tiempo y evita kill)
-            $finalHtml = $draftHtml;
-
-            if (!$this->looksLikeNictorys($draftHtml)) {
-                $draftShort  = mb_substr($draftHtml, 0, 12000);
-                $auditPrompt = $this->promptAuditorHtml($this->tipo, $this->keyword, $draftShort, $noRepetir);
-                $finalHtml   = $this->deepseekText($apiKey, $model, $auditPrompt, maxTokens: 4500);
-                $finalHtml   = $this->ensureNictorysWrappers($finalHtml);
+            // 2) Cargar template Elementor base
+            $templatePath = (string) env('ELEMENTOR_TEMPLATE_PATH', '');
+            if ($templatePath === '') {
+                throw new \RuntimeException('ELEMENTOR_TEMPLATE_PATH no configurado');
+            }
+            if (!is_file($templatePath)) {
+                throw new \RuntimeException("No existe el template Elementor en: {$templatePath}");
             }
 
-            // 3) Repair pass si todavía no cumple
-            if (!$this->looksLikeNictorys($finalHtml)) {
-                $repairPrompt = $this->promptRepairNictorys($this->keyword, mb_substr($finalHtml, 0, 14000));
-                $finalHtml = $this->deepseekText($apiKey, $model, $repairPrompt, maxTokens: 4500);
-                $finalHtml = $this->ensureNictorysWrappers($finalHtml);
+            $tpl = json_decode((string) file_get_contents($templatePath), true);
+            if (!is_array($tpl) || !isset($tpl['content'])) {
+                throw new \RuntimeException('Template Elementor inválido: falta content');
             }
 
-            // Title desde H1
-            $title = null;
-            if (preg_match('~<h1[^>]*>(.*?)</h1>~is', $finalHtml, $m)) {
-                $title = trim(strip_tags($m[1]));
-            }
+            // 3) Rellenar template (por IDs)
+            $filled = $this->fillElementorTemplate($tpl, $copy);
 
-            $slugBase = $title ? Str::slug($title) : Str::slug($this->keyword);
+            // 4) Title + slug
+            $title = trim(strip_tags((string)($copy['seo_title'] ?? $copy['hero_h1'] ?? $this->keyword)));
+            if ($title === '') $title = $this->keyword;
+
+            $slugBase = Str::slug($title ?: $this->keyword);
             $slug = $slugBase . '-' . $registro->id_dominio_contenido_detalle;
 
+            // 5) Guardar SOLO en BD
             $registro->update([
                 'title' => $title,
                 'slug' => $slug,
-                'contenido_html' => $finalHtml,
-                'draft_html' => $draftHtml,
+
+                // guardo el copy para debug/revisión
+                'draft_html' => json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+
+                // aquí guardo el JSON de Elementor final (lo que luego se manda a WP)
+                'contenido_html' => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+
                 'estatus' => 'generado',
                 'error' => null,
             ]);
@@ -104,10 +109,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         }
     }
 
-    /**
-     * DeepSeek (OpenAI compatible)
-     */
-    private function deepseekText(string $apiKey, string $model, string $prompt, int $maxTokens = 3500): string
+    private function deepseekText(string $apiKey, string $model, string $prompt, int $maxTokens = 1200): string
     {
         $resp = Http::withHeaders([
                 'Authorization' => 'Bearer ' . $apiKey,
@@ -115,8 +117,8 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 'Content-Type' => 'application/json',
             ])
             ->connectTimeout(15)
-            ->timeout(160)     // no lo dejes gigante
-            ->retry(0, 0)      // en generación es mejor no alargar con retries
+            ->timeout(160)
+            ->retry(0, 0)
             ->post('https://api.deepseek.com/v1/chat/completions', [
                 'model' => $model,
                 'messages' => [
@@ -140,228 +142,178 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         return $text;
     }
 
-    /**
-     * Fuerza wrappers necesarios para que el CSS del template funcione mejor:
-     * - <div class="nictorys-content">
-     * - <div class="page-wrapper">
-     */
-    private function ensureNictorysWrappers(string $html): string
+    private function promptCopyElementor(string $tipo, string $keyword, string $noRepetir): string
     {
-        $html = trim($html);
-
-        if (!str_contains($html, 'nictorys-content')) {
-            $html = '<div class="nictorys-content">' . $html . '</div>';
-        }
-
-        // si ya trae page-wrapper, no lo dupliques
-        if (!str_contains($html, 'page-wrapper')) {
-            // mete page-wrapper justo dentro del nictorys-content
-            $html = preg_replace(
-                '~<div class="nictorys-content">\s*~i',
-                '<div class="nictorys-content"><div class="page-wrapper">',
-                $html,
-                1
-            );
-            // cierra page-wrapper antes del cierre final
-            $html = preg_replace(
-                '~</div>\s*$~',
-                '</div></div>',
-                $html,
-                1
-            );
-        }
-
-        return $html;
-    }
-
-    private function looksLikeNictorys(string $html): bool
-    {
-        if ($html === '') return false;
-
-        // Must-have sections (mínimo)
-        $must = [
-            'nictorys-content',
-            'hero-slider hero-style-2',
-            'features-section-s2',
-            'about-us-section-s2',
-            'services-section-s2',
-            'contact-section',
-            'cta-section-s2',
-            'latest-projects-section-s2',
-            'why-choose-us-section',
-            'team-section',
-            'testimonials-section',
-            'blog-section',
-        ];
-
-        foreach ($must as $n) {
-            if (!str_contains($html, $n)) return false;
-        }
-
-        // 1 solo h1
-        preg_match_all('~<h1\b~i', $html, $m);
-        if (count($m[0] ?? []) !== 1) return false;
-
-        // no scripts/styles/links
-        if (preg_match('~<(script|style|link)\b~i', $html)) return false;
-
-        return true;
-    }
-
-    private function promptRedactor(string $tipo, string $keyword, string $noRepetir): string
-    {
-        $base = "Devuelve SOLO HTML válido.
-NO incluyas <!DOCTYPE>, <html>, <head>, <meta>, <title>, <body>.
-NO uses markdown. NO expliques nada.
-NO uses headings: Introducción, Conclusión, ¿Qué es...?
-NO uses casos de éxito ni testimonios.
-NO uses el texto 'guía práctica' ni variantes.
-NO uses Lorem ipsum.
-
-Títulos ya usados (NO repetir ni hacer muy similares):
-{$noRepetir}
-
-REGLA CLAVE:
-Aunque la keyword sea la misma, crea una versión totalmente distinta:
-- título diferente
-- orden distinto
-- argumentos y ejemplos distintos
-- evita frases tipo: 'en este artículo veremos...'.";
-
-        return "{$base}
-
-Keyword objetivo: {$keyword}
-Tipo: {$tipo}
-
-" . $this->nictorysContract() . "
-
-INSTRUCCIONES EXTRA:
-- El <h1> debe ir dentro del HERO (hero-slider).
-- El HTML final debe incluir además: <div class=\"page-wrapper\"> dentro de nictorys-content (si no lo pones, igual lo forzaremos).
-- Enlaces siempre href=\"#\".
-- Imágenes siempre assets/images/... (WordPress plugin reescribe).
-
-Devuelve SOLO el HTML.";
-    }
-
-    /**
-     * Auditor corto (NO repite el contrato completo para no inflar contexto)
-     */
-    private function promptAuditorHtml(string $tipo, string $keyword, string $draftHtml, string $noRepetir): string
-    {
-        return "Eres un consultor SEO senior. Reescribe el HTML para mejor conversión y claridad, manteniendo EXACTAMENTE la maqueta Nictorys.
-
-Devuelve SOLO HTML.
-No incluyas <!DOCTYPE>, <html>, <head>, <meta>, <title>, <body>.
-No uses markdown. No expliques nada.
-No headings genéricos: Introducción, Conclusión, ¿Qué es...?
-No casos de éxito ni testimonios reales.
-No 'guía práctica' ni variantes.
-No <script>, <style>, <link>, header, footer.
-
-Títulos ya usados (NO repetir ni hacer muy similares):
-{$noRepetir}
-
-REGLAS OBLIGATORIAS:
-- Debe estar envuelto en <div class=\"nictorys-content\"><div class=\"page-wrapper\"> ... </div></div>
-- Debe contener estas secciones en orden:
-  hero-slider hero-style-2 (1 solo <h1> dentro del hero)
-  features-section-s2
-  about-us-section-s2
-  services-section-s2 (id services)
-  contact-section (id contact)
-  cta-section-s2
-  latest-projects-section-s2
-  why-choose-us-section
-  team-section
-  testimonials-section (como Garantías/Compromisos, sin testimonios)
-  blog-section
-- Imágenes: assets/images/...
-- Enlaces: href=\"#\"
+        return <<<PROMPT
+Devuelve SOLO JSON válido (sin markdown, sin explicación, sin texto fuera del JSON).
 
 Keyword: {$keyword}
 Tipo: {$tipo}
 
-HTML a mejorar:
-{$draftHtml}";
-    }
+Títulos ya usados (NO repetir ni hacer muy similares):
+{$noRepetir}
 
-    private function promptRepairNictorys(string $keyword, string $html): string
-    {
-        return "Convierte este HTML a la plantilla Nictorys obligatoria.
+Devuelve ESTE esquema EXACTO:
+{
+  "seo_title": "...",
+  "hero_h1": "...",
+  "hero_p_html": "<p>...</p>",
 
-Devuelve SOLO HTML.
-Debe iniciar con:
-<div class=\"nictorys-content\"><div class=\"page-wrapper\">
-y cerrar ambos div al final.
-No incluyas scripts/styles/links ni header/footer.
+  "kit_h1": "...",
+  "kit_p_html": "<p>...</p>",
 
-Debe incluir estas secciones EN ORDEN:
-hero-slider hero-style-2 (con 1 solo <h1>)
-features-section-s2
-about-us-section-s2
-services-section-s2 (id services)
-contact-section (id contact)
-cta-section-s2
-latest-projects-section-s2
-why-choose-us-section
-team-section
-testimonials-section (Garantías)
-blog-section
+  "pack_h2": "...",
+  "pack_p_html": "<p>...</p>",
 
-Keyword: {$keyword}
+  "features": [
+    {"title":"...", "p_html":"<p>...</p>"},
+    {"title":"...", "p_html":"<p>...</p>"},
+    {"title":"...", "p_html":"<p>...</p>"},
+    {"title":"...", "p_html":"<p>...</p>"}
+  ],
 
-HTML:
-{$html}";
-    }
+  "faq_title": "...",
+  "faq": [
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"},
+    {"q":"...", "a_html":"<p>...</p>"}
+  ],
 
-    private function nictorysContract(): string
-    {
-        return <<<TXT
-DEVUELVE SOLO HTML (contenido). NO incluyas <!DOCTYPE>, <html>, <head>, <body>, <script>, <link>, <style>, header, footer.
-
-OBLIGATORIO: envuelve TODO en:
-<div class="nictorys-content"><div class="page-wrapper"> ... </div></div>
-
-Usa EXACTAMENTE estas secciones y clases (en este orden):
-1) <section class="hero-slider hero-style-2"> ... (AQUÍ va el ÚNICO <h1>)
-   - Debe incluir .swiper-container, .swiper-wrapper, .swiper-slide
-   - Dentro: .slide-inner.slide-bg-image con data-background="assets/images/slider/slide-1.jpg"
-   - Incluye 2 CTAs con clases theme-btn y theme-btn-s2
-
-2) <section class="features-section-s2"> ... (4 features .grid)
-
-3) <section class="about-us-section-s2 section-padding p-t-0"> ...
-   - Incluye .img-holder y .about-details + <ul><li>...
-
-4) <section class="services-section-s2 section-padding" id="services"> ...
-   - 6 cards .grid con .img-holder + .details + icon <i class="fi ..."></i>
-
-5) <section class="contact-section section-padding" id="contact"> ...
-   - Form similar (inputs + textarea) action="#"
-
-6) <section class="cta-section-s2"> ... (CTA fuerte)
-
-7) <section class="latest-projects-section-s2 section-padding"> ...
-   - 6 items .grid con imagen + título
-
-8) <section class="why-choose-us-section section-padding p-t-0"> ...
-   - skills con progress-bar data-percent
-
-9) <section class="team-section section-padding p-t-0"> ... (4 miembros)
-
-10) <section class="testimonials-section section-padding"> ...
-   - NO testimonios reales. Úsalo como Garantías/Compromisos (2 bloques)
-
-11) <section class="blog-section section-padding"> ...
-   - 3 entradas sugeridas
+  "final_cta_h3": "..."
+}
 
 REGLAS:
-- Español orientado a conversión.
-- No headings genéricos: “Introducción”, “Conclusión”, “¿Qué es…?”
-- No “guía práctica” ni variantes.
-- Enlaces href="#".
-- Imágenes assets/images/...
-TXT;
+- Español, orientado a conversión.
+- NO uses “Introducción”, “Conclusión”, “¿Qué es…?”
+- NO uses testimonios reales ni casos de éxito.
+- NO uses “guía práctica”.
+- En p_html/a_html usa HTML simple: <p>, <strong>, <br>.
+PROMPT;
+    }
+
+    private function parseJsonStrict(string $raw): array
+    {
+        $raw = trim($raw);
+        $raw = preg_replace('~^```(?:json)?\s*~i', '', $raw);
+        $raw = preg_replace('~\s*```$~', '', $raw);
+        $raw = trim($raw);
+
+        $start = strpos($raw, '{');
+        $end   = strrpos($raw, '}');
+        if ($start !== false && $end !== false && $end > $start) {
+            $raw = substr($raw, $start, $end - $start + 1);
+        }
+
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            throw new \RuntimeException('DeepSeek no devolvió JSON válido');
+        }
+        return $data;
+    }
+
+    private function validateCopySchema(array $copy): void
+    {
+        $must = ['seo_title','hero_h1','hero_p_html','kit_h1','kit_p_html','pack_h2','pack_p_html','features','faq_title','faq','final_cta_h3'];
+        foreach ($must as $k) {
+            if (!array_key_exists($k, $copy)) {
+                throw new \RuntimeException("JSON copy incompleto, falta: {$k}");
+            }
+        }
+        if (!is_array($copy['features']) || count($copy['features']) !== 4) {
+            throw new \RuntimeException('features debe tener 4 items');
+        }
+        if (!is_array($copy['faq']) || count($copy['faq']) !== 9) {
+            throw new \RuntimeException('faq debe tener 9 items');
+        }
+    }
+
+    /**
+     * Reemplaza texto en widgets por ID (IDs de tu plantilla v64)
+     */
+    private function fillElementorTemplate(array $tpl, array $copy): array
+    {
+        $set = function(string $id, string $key, $value) use (&$tpl): void {
+            $walk = function (&$nodes) use (&$walk, $id, $key, $value): bool {
+                if (!is_array($nodes)) return false;
+                foreach ($nodes as &$n) {
+                    if (is_array($n) && ($n['id'] ?? null) === $id && ($n['elType'] ?? null) === 'widget') {
+                        if (!isset($n['settings']) || !is_array($n['settings'])) $n['settings'] = [];
+                        $n['settings'][$key] = $value;
+                        return true;
+                    }
+                    if (!empty($n['elements']) && $walk($n['elements'])) return true;
+                }
+                return false;
+            };
+            $walk($tpl['content']);
+        };
+
+        $mutateWidget = function(string $widgetId, callable $fn) use (&$tpl): void {
+            $walk = function (&$nodes) use (&$walk, $widgetId, $fn): bool {
+                if (!is_array($nodes)) return false;
+                foreach ($nodes as &$n) {
+                    if (($n['id'] ?? null) === $widgetId && ($n['elType'] ?? null) === 'widget') {
+                        $fn($n);
+                        return true;
+                    }
+                    if (!empty($n['elements']) && $walk($n['elements'])) return true;
+                }
+                return false;
+            };
+            $walk($tpl['content']);
+        };
+
+        // HERO
+        $set('1d822e12', 'title', $copy['hero_h1']);
+        $set('6074ada3', 'editor', $copy['hero_p_html']);
+
+        // KIT
+        $set('14d64ba5', 'title', $copy['kit_h1']);
+        $set('3742cd49', 'editor', $copy['kit_p_html']);
+
+        // PACK
+        $set('5a85cb05', 'title', $copy['pack_h2']);
+        $set('6ad00c97', 'editor', $copy['pack_p_html']);
+
+        // FEATURES (4 cards)
+        $featureMap = [
+            ['titleId' => '526367e6', 'pId' => '45af2625'],
+            ['titleId' => '4666a6c0', 'pId' => '53b8710d'],
+            ['titleId' => '556cf582', 'pId' => '1043978d'],
+            ['titleId' => '671577a',  'pId' => '35dc5b0f'],
+        ];
+        foreach ($featureMap as $i => $m) {
+            $set($m['titleId'], 'title',  (string)$copy['features'][$i]['title']);
+            $set($m['pId'],     'editor', (string)$copy['features'][$i]['p_html']);
+        }
+
+        // FAQ
+        $set('6af89728', 'title', $copy['faq_title']);
+
+        // actualizar títulos del accordion
+        $mutateWidget('19d18174', function (&$w) use ($copy) {
+            if (!isset($w['settings']['items']) || !is_array($w['settings']['items'])) return;
+            foreach ($w['settings']['items'] as $i => &$it) {
+                if (!isset($copy['faq'][$i])) continue;
+                $it['item_title'] = (string)$copy['faq'][$i]['q'];
+            }
+        });
+
+        // respuestas del FAQ por IDs
+        $faqAnswerIds = ['4187d584','289604f1','5f11dfaa','68e67f41','5ba521b7','3012a20a','267fd373','4091b80d','7d07103e'];
+        foreach ($faqAnswerIds as $i => $ansId) {
+            $set($ansId, 'editor', (string)$copy['faq'][$i]['a_html']);
+        }
+
+        // CTA final
+        $set('15bd3353', 'title', $copy['final_cta_h3']);
+
+        return $tpl;
     }
 }

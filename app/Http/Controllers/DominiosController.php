@@ -614,12 +614,18 @@ public function ContenidoGenerado(Request $request, string $IdDominio)
         // Si quieres programar: manda schedule_at ISO (ej: 2025-12-19 10:00:00)
         // Si no, publica normal.
         $payload = [
-            'type'       => $type,
-            'wp_id'      => $it->wp_id ?: null, // si existe, actualiza
-            'title'      => $it->title ?: ($it->keyword ?: 'Sin título'),
-            'content'    => $it->contenido_html ?: '',
-            'status'     => 'publish', // o 'draft' si quieres primero borrador
-            // 'schedule_at' => '2025-12-19 10:00:00',
+          'type'       => $type,
+          'wp_id'      => $it->wp_id ?: null,
+          'title'      => $it->title ?: ($it->keyword ?: 'Sin título'),
+          
+          // 👇 Aquí va el JSON Elementor guardado en BD (no HTML)
+          'content'    => $it->contenido_html ?: '',
+          
+          // 👇 Recomendado: bandera explícita
+          'builder'    => 'elementor',
+          
+          'status'     => 'publish',
+          // 'schedule_at' => '2025-12-19 10:00:00',
         ];
 
         $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
