@@ -586,10 +586,7 @@ public function ContenidoGenerado(Request $request, string $IdDominio)
 
 
 
-   use Illuminate\Http\RedirectResponse;
-use Illuminate\Support\Facades\Http;
-use App\Models\DominiosModel;
-use App\Models\Dominios_Contenido_DetallesModel;
+
 
 public function publicar($dominio, int $detalle): RedirectResponse
 {
