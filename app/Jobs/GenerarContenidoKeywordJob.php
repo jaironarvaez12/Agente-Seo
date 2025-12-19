@@ -54,28 +54,17 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             $noRepetir = implode(' | ', array_filter($existentes));
 
-            // 1) Copy como JSON (no HTML libre)
+            // 1) Generar COPY como JSON
             $copyPrompt = $this->promptCopyElementor($this->tipo, $this->keyword, $noRepetir);
             $copyRaw    = $this->deepseekText($apiKey, $model, $copyPrompt, maxTokens: 1800);
 
             $copy = $this->parseJsonStrict($copyRaw);
             $this->validateCopySchema($copy);
 
-            // 2) Cargar template Elementor base
-            $templatePath = (string) env('ELEMENTOR_TEMPLATE_PATH', '');
-            if ($templatePath === '') {
-                throw new \RuntimeException('ELEMENTOR_TEMPLATE_PATH no configurado');
-            }
-            if (!is_file($templatePath)) {
-                throw new \RuntimeException("No existe el template Elementor en: {$templatePath}");
-            }
+            // 2) Cargar template Elementor base desde storage/app/...
+            $tpl = $this->loadElementorTemplateFromStorage();
 
-            $tpl = json_decode((string) file_get_contents($templatePath), true);
-            if (!is_array($tpl) || !isset($tpl['content'])) {
-                throw new \RuntimeException('Template Elementor inválido: falta content');
-            }
-
-            // 3) Rellenar template (por IDs)
+            // 3) Rellenar el template con el copy (por IDs)
             $filled = $this->fillElementorTemplate($tpl, $copy);
 
             // 4) Title + slug
@@ -85,17 +74,12 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $slugBase = Str::slug($title ?: $this->keyword);
             $slug = $slugBase . '-' . $registro->id_dominio_contenido_detalle;
 
-            // 5) Guardar SOLO en BD
+            // 5) Guardar en BD (NO publica a WP; tú lo haces con tu método publicar())
             $registro->update([
                 'title' => $title,
                 'slug' => $slug,
-
-                // guardo el copy para debug/revisión
                 'draft_html' => json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-
-                // aquí guardo el JSON de Elementor final (lo que luego se manda a WP)
                 'contenido_html' => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-
                 'estatus' => 'generado',
                 'error' => null,
             ]);
@@ -109,6 +93,42 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         }
     }
 
+    /**
+     * ✅ Carga el template Elementor desde storage/app/<ELEMENTOR_TEMPLATE_PATH>
+     * ELEMENTOR_TEMPLATE_PATH debe ser ruta relativa, NO URL
+     * ejemplo: elementor/elementor-64.json
+     */
+    private function loadElementorTemplateFromStorage(): array
+    {
+        $templateRel = (string) env('ELEMENTOR_TEMPLATE_PATH', '');
+        if ($templateRel === '') {
+            throw new \RuntimeException('ELEMENTOR_TEMPLATE_PATH no configurado. Ej: elementor/elementor-64.json');
+        }
+
+        // No aceptar URL (para evitar el error que te salió)
+        if (preg_match('~^https?://~i', $templateRel)) {
+            throw new \RuntimeException('ELEMENTOR_TEMPLATE_PATH debe ser una ruta local (ej: elementor/elementor-64.json), no una URL.');
+        }
+
+        $templatePath = storage_path('app/' . ltrim($templateRel, '/'));
+
+        if (!is_file($templatePath)) {
+            throw new \RuntimeException("No existe el template Elementor en disco: {$templatePath}");
+        }
+
+        $raw = (string) file_get_contents($templatePath);
+        $tpl = json_decode($raw, true);
+
+        if (!is_array($tpl) || !isset($tpl['content']) || !is_array($tpl['content'])) {
+            throw new \RuntimeException('Template Elementor inválido: debe contener "content" (array).');
+        }
+
+        return $tpl;
+    }
+
+    /**
+     * DeepSeek (OpenAI compatible)
+     */
     private function deepseekText(string $apiKey, string $model, string $prompt, int $maxTokens = 1200): string
     {
         $resp = Http::withHeaders([
@@ -142,6 +162,9 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         return $text;
     }
 
+    /**
+     * Prompt: devuelve SOLO JSON (copy)
+     */
     private function promptCopyElementor(string $tipo, string $keyword, string $noRepetir): string
     {
         return <<<PROMPT
@@ -197,9 +220,13 @@ REGLAS:
 PROMPT;
     }
 
+    /**
+     * Parse JSON aunque venga con ``` o basura alrededor
+     */
     private function parseJsonStrict(string $raw): array
     {
         $raw = trim($raw);
+
         $raw = preg_replace('~^```(?:json)?\s*~i', '', $raw);
         $raw = preg_replace('~\s*```$~', '', $raw);
         $raw = trim($raw);
@@ -234,7 +261,7 @@ PROMPT;
     }
 
     /**
-     * Reemplaza texto en widgets por ID (IDs de tu plantilla v64)
+     * Rellena el template Elementor con los IDs de tu plantilla v64
      */
     private function fillElementorTemplate(array $tpl, array $copy): array
     {
@@ -281,7 +308,7 @@ PROMPT;
         $set('5a85cb05', 'title', $copy['pack_h2']);
         $set('6ad00c97', 'editor', $copy['pack_p_html']);
 
-        // FEATURES (4 cards)
+        // FEATURES
         $featureMap = [
             ['titleId' => '526367e6', 'pId' => '45af2625'],
             ['titleId' => '4666a6c0', 'pId' => '53b8710d'],
@@ -296,7 +323,6 @@ PROMPT;
         // FAQ
         $set('6af89728', 'title', $copy['faq_title']);
 
-        // actualizar títulos del accordion
         $mutateWidget('19d18174', function (&$w) use ($copy) {
             if (!isset($w['settings']['items']) || !is_array($w['settings']['items'])) return;
             foreach ($w['settings']['items'] as $i => &$it) {
@@ -305,7 +331,6 @@ PROMPT;
             }
         });
 
-        // respuestas del FAQ por IDs
         $faqAnswerIds = ['4187d584','289604f1','5f11dfaa','68e67f41','5ba521b7','3012a20a','267fd373','4091b80d','7d07103e'];
         foreach ($faqAnswerIds as $i => $ansId) {
             $set($ansId, 'editor', (string)$copy['faq'][$i]['a_html']);
