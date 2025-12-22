@@ -17,14 +17,13 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    // Producción: reintentos controlados
+    // Producción
     public $timeout = 4200;
     public $tries   = 5;
     public $backoff = [60, 120, 300, 600, 900];
 
     public ?int $registroId = null;
 
-    // contexto del brief para fallback dinámico
     private array $briefContext = [];
 
     public function __construct(
@@ -36,11 +35,10 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
     public function handle(): void
     {
-        // Reusar registro entre reintentos
+        // Reusar registro entre reintentos (para no crear basura en BD)
+        $registro = null;
         if ($this->registroId) {
             $registro = Dominios_Contenido_DetallesModel::where('id_dominio_contenido_detalle', $this->registroId)->first();
-        } else {
-            $registro = null;
         }
 
         if (!$registro) {
@@ -249,29 +247,22 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         $this->briefContext = $brief;
 
         $copy = $this->sanitizeAndNormalizeCopy($copy);
-        $this->applyDynamicFallbacks($copy); // 🔥 evita campos vacíos
+        $this->applyDynamicFallbacks($copy, force: false);
 
         try {
             return $this->validateAndFixCopy($copy);
         } catch (\Throwable $e) {
             $msg = $e->getMessage();
 
-            // Si el error es de campos vacíos/HTML vacío, aplicamos fallback fuerte y seguimos
+            // Campos vacíos: fallback fuerte y seguimos
             if (str_contains($msg, 'Campo vacío generado:') || str_contains($msg, 'HTML vacío generado:')) {
                 $this->applyDynamicFallbacks($copy, force: true);
                 return $this->validateAndFixCopy($copy);
             }
 
-            // Para errores de estructura (features/faq), intentamos 1 repair con IA, y si no, fallback.
+            // Errores estructurales: 1 repair con IA, y si no, fallback.
             $repairRaw = $this->repairMissingFieldsViaDeepseek(
-                $apiKey,
-                $model,
-                $copy,
-                $brief,
-                $stage,
-                $msg,
-                $noRepetirTitles,
-                $noRepetirCorpus
+                $apiKey, $model, $copy, $brief, $stage, $msg, $noRepetirTitles, $noRepetirCorpus
             );
 
             $repaired = $this->safeParseOrRepair($apiKey, $model, $repairRaw, $brief);
@@ -291,127 +282,119 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     private function applyDynamicFallbacks(array &$copy, bool $force = false, bool $hard = false): void
     {
         $kw = $this->shortKw();
-        $angle = $this->toStr($this->briefContext['angle'] ?? '');
         $tone  = $this->toStr($this->briefContext['tone'] ?? '');
         $cta   = $this->toStr($this->briefContext['cta'] ?? '');
         $aud   = $this->toStr($this->briefContext['audience'] ?? '');
 
-        $needText = function(string $k) use (&$copy, $force): bool {
-            $v = trim(strip_tags($this->toStr($copy[$k] ?? '')));
-            return $force ? ($v === '') : ($v === '');
+        $needText = function(string $k) use (&$copy): bool {
+            return trim(strip_tags($this->toStr($copy[$k] ?? ''))) === '';
         };
 
-        $needHtml = function(string $k) use (&$copy, $force): bool {
+        $needHtml = function(string $k) use (&$copy): bool {
             $h = $this->keepAllowedInlineHtml($this->stripH1Tags($this->toStr($copy[$k] ?? '')));
-            $isBlank = ($h === '' || $this->isBlankHtml($h) || preg_match('~<p>\s*</p>~i', $h));
-            return $force ? $isBlank : $isBlank;
+            return ($h === '' || $this->isBlankHtml($h) || preg_match('~<p>\s*</p>~i', $h));
         };
 
-        // --- Campos simples
+        // --- HERO / PACK / KIT básicos
         if ($needText('hero_kicker')) {
             $copy['hero_kicker'] = $this->pick([
-                "Web enfocada en captar clientes",
-                "Diseño web con intención",
-                "Sitio profesional que convierte",
-                "Página corporativa optimizada",
-            ]) . " · {$kw}";
-            $copy['hero_kicker'] = mb_substr($copy['hero_kicker'], 0, 48);
+                "Web que convierte",
+                "Diseño web pro",
+                "Sitio optimizado",
+                "Página efectiva",
+            ]);
         }
+
+        if ($needText('hero_h1')) $copy['hero_h1'] = "{$kw} con estructura y copy que convierten";
+
+        if ($needHtml('hero_p_html')) {
+            $copy['hero_p_html'] = "<p>Construimos {$kw} con un mensaje claro, estructura escaneable y decisiones orientadas a convertir. {$tone}" . ($aud !== '' ? " Pensado para {$aud}." : '') . "</p>";
+        }
+
+        if ($needText('kit_h1')) $copy['kit_h1'] = "Kit para {$kw}";
+        if ($needHtml('kit_p_html')) $copy['kit_p_html'] = "<p>Un kit completo para implementar rápido: estructura, copy y bloques listos para publicar en {$kw}, sin secciones vacías.</p>";
+
+        if ($needText('pack_h2')) $copy['pack_h2'] = "Pack de {$kw} listo para publicar";
+        if ($needHtml('pack_p_html')) $copy['pack_p_html'] = "<p>Pack listo para publicar: secciones coherentes, beneficios claros y CTA alineado a {$cta}.</p>";
 
         if ($needText('price_h2')) {
             $copy['price_h2'] = $this->pick([
+                "Web profesional desde 500 €",
                 "Lanza tu web desde 500 €",
                 "Web lista para convertir desde 500 €",
-                "Tu web optimizada desde 500 €",
-                "Página profesional desde 500 €",
             ]);
-            $copy['price_h2'] = mb_substr($copy['price_h2'], 0, 48);
         }
 
-        if ($needText('btn_presupuesto')) $copy['btn_presupuesto'] = $this->pick(["Solicitar presupuesto","Pedir presupuesto","Pedir propuesta"]);
-        if ($needText('btn_reunion'))     $copy['btn_reunion']     = $this->pick(["Reservar llamada","Agendar llamada","Hablar con un experto"]);
+        // --- CLIENTS (subtitle corto + párrafo propio)
+        if ($needText('clients_label')) $copy['clients_label'] = $this->pick(["Clientes","Marcas","Empresas","Negocios","Equipos"]);
 
-        // --- Kit Digital (todo generado / variable)
+        // ✅ subtitle CORTO para que no se vea raro
+        if ($needText('clients_subtitle')) {
+            $copy['clients_subtitle'] = $this->pick([
+                "Marcas que priorizan conversión",
+                "Negocios que buscan claridad",
+                "Equipos con foco en resultados",
+                "Proyectos que quieren orden",
+            ]);
+        } else {
+            // recorta si vino largo
+            $s = trim(strip_tags($this->toStr($copy['clients_subtitle'])));
+            $words = preg_split('~\s+~u', $s, -1, PREG_SPLIT_NO_EMPTY);
+            if ($words && count($words) > 12) {
+                $copy['clients_subtitle'] = implode(' ', array_slice($words, 0, 12));
+            }
+        }
+
+        // ✅ párrafo de clientes (NO usar pack_p_html)
+        if ($needHtml('clients_p_html')) {
+            $copy['clients_p_html'] = "<p>Trabajamos con {$copy['clients_label']} que quieren una web coherente con su propuesta: mensaje claro, estructura que guía la decisión y CTA listo para convertir, sin relleno.</p>";
+        }
+
+        if ($needText('reviews_label')) $copy['reviews_label'] = $this->pick(["Opiniones","Reseñas","Valoraciones","Resultados"]);
+        if ($needText('testimonios_title')) $copy['testimonios_title'] = $this->pick(["Lo que valoran nuestros clientes","Por qué este enfoque funciona","Experiencias de proyectos similares"]);
+        if ($needText('projects_title')) $copy['projects_title'] = $this->pick(["Proyectos web: conversión y claridad","Trabajos publicados: enfoque y ejecución","Casos de web: estructura y resultados"]);
+
+        // --- CTA / botones
+        if ($needText('final_cta_h3')) $copy['final_cta_h3'] = "¿Listo para avanzar con {$kw}?";
+        if ($needText('btn_presupuesto')) $copy['btn_presupuesto'] = $this->pick(["Pedir presupuesto","Solicitar propuesta","Solicitar presupuesto"]);
+        if ($needText('btn_reunion')) $copy['btn_reunion'] = $this->pick(["Reservar llamada","Agendar llamada","Hablar con un experto"]);
+
+        // --- Kit Digital (todo generado)
         if ($needText('kitdigital_bold')) {
             $copy['kitdigital_bold'] = $this->pick([
-                "Kit Digital para impulsar tu web",
                 "Aprovecha el Kit Digital",
+                "Kit Digital para tu web",
                 "Activa tu Kit Digital",
             ]);
         }
         if ($needHtml('kitdigital_p_html')) {
-            $copy['kitdigital_p_html'] =
-                "<p>Si encajas en el <strong>Kit Digital</strong>, te guiamos en la solicitud y adaptamos {$kw} para dejar la web lista para captar oportunidades, sin pasos confusos ni bloqueos.</p>";
+            $copy['kitdigital_p_html'] = "<p>Si encajas en el <strong>Kit Digital</strong>, te guiamos en la solicitud y adaptamos {$kw} para dejar la web lista para captar oportunidades, sin promesas irreales ni pasos confusos.</p>";
         }
-        if ($needText('btn_kitdigital')) {
-            $copy['btn_kitdigital'] = $this->pick(["Acceder al Kit Digital","Ver opciones Kit Digital","Solicitar Kit Digital"]);
-            $copy['btn_kitdigital'] = mb_substr($copy['btn_kitdigital'], 0, 26);
-        }
+        if ($needText('btn_kitdigital')) $copy['btn_kitdigital'] = $this->pick(["Ver Kit Digital","Solicitar Kit Digital","Acceder al Kit Digital"]);
 
-        // --- Clients / reviews / projects (aquí estaba tu crash)
-        if ($needText('clients_label')) {
-            $copy['clients_label'] = $this->pick(["Clientes","Marcas","Empresas","Negocios","Equipos"]);
-        }
-        if ($needText('clients_subtitle')) {
-            $copy['clients_subtitle'] = $this->pick([
-                "Equipos que buscan claridad y conversión en {$kw}.",
-                "Negocios que priorizan resultados medibles y ejecución rápida.",
-                "Marcas que quieren una web coherente con su propuesta y fácil de publicar.",
-            ]) . ($angle !== '' ? " Enfoque: {$angle}." : '');
-            $copy['clients_subtitle'] = mb_substr($copy['clients_subtitle'], 0, 140);
-        }
-        if ($needText('reviews_label')) {
-            $copy['reviews_label'] = $this->pick(["Opiniones","Reseñas","Valoraciones","Resultados"]);
-        }
-        if ($needText('testimonios_title')) {
-            $copy['testimonios_title'] = $this->pick([
-                "Lo que valoran quienes trabajan con nosotros",
-                "Por qué este enfoque funciona",
-                "Experiencias de proyectos similares",
-            ]);
-        }
-        if ($needText('projects_title')) {
-            $copy['projects_title'] = $this->pick([
-                "Proyectos web: estructura, rendimiento y conversión",
-                "Trabajos publicados: enfoque y ejecución",
-                "Casos de web: claridad y resultados",
-            ]);
-        }
+        // --- SEO title
+        if ($needText('seo_title')) $copy['seo_title'] = "Web profesional para {$kw} lista para convertir y publicar";
+        $seo = trim(strip_tags($this->toStr($copy['seo_title'])));
+        if (mb_strlen($seo) > 65) $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
+        $copy['seo_title'] = $seo;
 
-        // --- HTML principales
-        if ($needHtml('hero_p_html')) {
-            $copy['hero_p_html'] = "<p>Construimos {$kw} con un mensaje claro, estructura escaneable y decisiones orientadas a convertir. {$tone}" . ($aud !== '' ? " Pensado para {$aud}." : '') . "</p>";
-        }
-        if ($needHtml('kit_p_html')) {
-            $copy['kit_p_html'] = "<p>Un kit completo para implementar rápido: estructura, copy y bloques listos para publicar en {$kw}, sin secciones vacías.</p>";
-        }
-        if ($needHtml('pack_p_html')) {
-            $copy['pack_p_html'] = "<p>Pack listo para publicar: secciones coherentes, beneficios claros y CTA alineado a {$cta}.</p>";
-        }
-
-        // --- Estructuras (features / faq): si faltan, se generan
+        // --- Estructuras
         $copy['features'] = (isset($copy['features']) && is_array($copy['features'])) ? $copy['features'] : [];
         $copy['faq']      = (isset($copy['faq']) && is_array($copy['faq'])) ? $copy['faq'] : [];
 
+        // features: asegurar 4
         if ($hard || count($copy['features']) !== 4) {
-            $copy['features'] = [];
-            $templates = [
-                ["Claridad en la propuesta", "<p><strong>Qué aporta:</strong> aterriza tu oferta para que {$kw} se entienda en segundos y empuje a la acción.</p>"],
-                ["Estructura pensada para convertir", "<p><strong>Qué aporta:</strong> ordena secciones por intención (beneficio → prueba → CTA) sin relleno.</p>"],
-                ["SEO natural sin stuffing", "<p><strong>Qué aporta:</strong> semántica y intención de búsqueda integradas, sin repetir la keyword como robot.</p>"],
-                ["Listo para publicar", "<p><strong>Qué aporta:</strong> bloques y textos preparados para Elementor/WordPress, sin huecos ni remiendos.</p>"],
+            $copy['features'] = [
+                ['title' => "Claridad en la propuesta · {$kw}", 'p_html' => "<p><strong>Qué aporta:</strong> aterriza tu oferta para que se entienda rápido y empuje a la acción.</p>"],
+                ['title' => "Estructura pensada para convertir · {$kw}", 'p_html' => "<p><strong>Qué aporta:</strong> ordena secciones por intención (beneficio → prueba → CTA) sin relleno.</p>"],
+                ['title' => "SEO natural sin stuffing · {$kw}", 'p_html' => "<p><strong>Qué aporta:</strong> semántica e intención integradas sin repetir la keyword como robot.</p>"],
+                ['title' => "Listo para publicar · {$kw}", 'p_html' => "<p><strong>Qué aporta:</strong> bloques y textos preparados para Elementor/WordPress, sin huecos.</p>"],
             ];
-            foreach ($templates as $t) {
-                $copy['features'][] = ['title' => $t[0] . " · {$kw}", 'p_html' => $t[1]];
-            }
         } else {
-            // completar huecos internos
             for ($i=0; $i<4; $i++) {
                 if (!isset($copy['features'][$i]) || !is_array($copy['features'][$i])) $copy['features'][$i] = [];
                 if (trim(strip_tags($this->toStr($copy['features'][$i]['title'] ?? ''))) === '') {
-                    $copy['features'][$i]['title'] = $this->pick([
-                        "Mejora clave", "Optimización", "Ventaja", "Bloque de conversión"
-                    ]) . " · {$kw}";
+                    $copy['features'][$i]['title'] = $this->pick(["Mejora clave","Optimización","Ventaja","Bloque de conversión"]) . " · {$kw}";
                 }
                 $p = $this->keepAllowedInlineHtml($this->stripH1Tags($this->toStr($copy['features'][$i]['p_html'] ?? '')));
                 if ($p === '' || $this->isBlankHtml($p)) {
@@ -420,6 +403,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             }
         }
 
+        // faq: asegurar 9
         if ($hard || count($copy['faq']) !== 9) {
             $copy['faq'] = [];
             $qTpl = [
@@ -444,41 +428,17 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 "<p>Se contempla una ronda razonable de ajustes para mantener coherencia y calidad.</p>",
                 "<p>No prometemos resultados irreales: definimos alcance, tiempos y entregables con transparencia.</p>",
             ];
-            for ($i=0; $i<9; $i++) {
-                $copy['faq'][] = ['q' => $qTpl[$i], 'a_html' => $aTpl[$i]];
-            }
+            for ($i=0; $i<9; $i++) $copy['faq'][] = ['q' => $qTpl[$i], 'a_html' => $aTpl[$i]];
         } else {
             for ($i=0; $i<9; $i++) {
                 if (!isset($copy['faq'][$i]) || !is_array($copy['faq'][$i])) $copy['faq'][$i] = [];
-                if (trim(strip_tags($this->toStr($copy['faq'][$i]['q'] ?? ''))) === '') {
-                    $copy['faq'][$i]['q'] = "¿Cómo funciona {$kw}?";
-                }
+                if (trim(strip_tags($this->toStr($copy['faq'][$i]['q'] ?? ''))) === '') $copy['faq'][$i]['q'] = "¿Cómo funciona {$kw}?";
                 $a = $this->keepAllowedInlineHtml($this->stripH1Tags($this->toStr($copy['faq'][$i]['a_html'] ?? '')));
-                if ($a === '' || $this->isBlankHtml($a)) {
-                    $copy['faq'][$i]['a_html'] = "<p>Lo adaptamos a tu caso y lo dejamos listo para publicar, sin huecos ni secciones vacías.</p>";
-                }
+                if ($a === '' || $this->isBlankHtml($a)) $copy['faq'][$i]['a_html'] = "<p>Lo adaptamos a tu caso y lo dejamos listo para publicar, sin huecos ni secciones vacías.</p>";
             }
         }
 
-        // --- Campos restantes obligatorios (si aún faltan)
-        $defaultsText = [
-            'seo_title' => "Web profesional para {$kw} lista para convertir y publicar",
-            'hero_h1' => "{$kw} con estructura y copy que convierten",
-            'kit_h1' => "Kit para {$kw}",
-            'pack_h2' => "Pack de {$kw} listo para publicar",
-            'faq_title' => "Preguntas frecuentes sobre {$kw}",
-            'final_cta_h3' => "¿Listo para avanzar con {$kw}?",
-        ];
-
-        foreach ($defaultsText as $k => $v) {
-            if ($needText($k)) $copy[$k] = $v;
-        }
-
-        // seo_title en rango (aprox)
-        $seo = trim(strip_tags($this->toStr($copy['seo_title'] ?? '')));
-        if ($seo === '') $seo = $defaultsText['seo_title'];
-        if (mb_strlen($seo) > 65) $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
-        $copy['seo_title'] = $seo;
+        if ($needText('faq_title')) $copy['faq_title'] = "Preguntas frecuentes sobre {$kw}";
     }
 
     // ===========================================================
@@ -651,6 +611,8 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             'clients_label' => '',
             'clients_subtitle' => '',
+            'clients_p_html' => '<p></p>',
+
             'reviews_label' => '',
             'testimonios_title' => '',
             'projects_title' => '',
@@ -687,7 +649,8 @@ Completa este JSON y devuélvelo VÁLIDO con estas keys obligatorias:
 seo_title, hero_kicker, hero_h1, hero_p_html,
 kit_h1, kit_p_html, pack_h2, pack_p_html, price_h2,
 features (4),
-clients_label, clients_subtitle, reviews_label, testimonios_title, projects_title,
+clients_label, clients_subtitle, clients_p_html,
+reviews_label, testimonios_title, projects_title,
 faq_title, faq (9),
 final_cta_h3, btn_presupuesto, btn_reunion,
 kitdigital_bold, kitdigital_p_html, btn_kitdigital
@@ -696,7 +659,8 @@ Reglas:
 - HTML permitido SOLO: <p>, <strong>, <br>
 - SOLO 1 H1: hero_h1 (no uses <h1>)
 - 4 features exactas y 9 FAQs exactas
-- NO vacíos ni "<p></p>" ni "<p> </p>"
+- clients_subtitle MUY CORTO (6–12 palabras)
+- NO vacíos ni "<p></p>"
 
 Estilo:
 - Ángulo: {$angle}
@@ -745,7 +709,8 @@ PROMPT;
             'seo_title','hero_kicker','hero_h1','hero_p_html',
             'kit_h1','kit_p_html',
             'pack_h2','pack_p_html','price_h2',
-            'clients_label','clients_subtitle','reviews_label','testimonios_title','projects_title',
+            'clients_label','clients_subtitle','clients_p_html',
+            'reviews_label','testimonios_title','projects_title',
             'faq_title','final_cta_h3',
             'btn_presupuesto','btn_reunion',
             'kitdigital_bold','kitdigital_p_html','btn_kitdigital'
@@ -877,15 +842,23 @@ NO REPETIR TÍTULOS:
 NO REPETIR FRASES / SUBTEMAS:
 {$noRepetirCorpus}
 
-REGLAS:
-- TODO debe venir relleno (nunca vacío).
+REGLAS DURAS:
+- NO dejes NINGÚN campo vacío. Prohibido "", null o "<p></p>" o "<p> </p>".
 - SOLO 1 H1: hero_h1 (no uses <h1>).
-- HTML permitido: <p>, <strong>, <br>.
+- No usar “Introducción”, “Conclusión”, “¿Qué es…?”.
+- Sin testimonios reales ni claims falsos.
+- Evita keyword stuffing.
+- HTML permitido SOLO: <p>, <strong>, <br>.
 - EXACTAMENTE 4 features y EXACTAMENTE 9 FAQs.
-- Sin "<p></p>" ni "<p> </p>".
+- Longitudes cortas para evitar cortes:
+  hero_p_html/kit_p_html/pack_p_html/clients_p_html/kitdigital_p_html <= 320 chars
+  feature p_html <= 240 chars
+  faq a_html <= 260 chars
+  seo_title 60-65 chars
+- clients_subtitle debe ser MUY CORTO (6–12 palabras). No “Enfoque:” ni frases largas.
 
-ESQUEMA EXACTO:
-{"seo_title":"...","hero_kicker":"...","hero_h1":"...","hero_p_html":"<p>...</p>","kit_h1":"...","kit_p_html":"<p>...</p>","pack_h2":"...","pack_p_html":"<p>...</p>","price_h2":"...","features":[{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"}],"clients_label":"...","clients_subtitle":"...","reviews_label":"...","testimonios_title":"...","projects_title":"...","faq_title":"...","faq":[{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"}],"final_cta_h3":"...","btn_presupuesto":"...","btn_reunion":"...","kitdigital_bold":"...","kitdigital_p_html":"<p>...</p>","btn_kitdigital":"..."}
+ESQUEMA EXACTO (NO cambies keys):
+{"seo_title":"...","hero_kicker":"...","hero_h1":"...","hero_p_html":"<p>...</p>","kit_h1":"...","kit_p_html":"<p>...</p>","pack_h2":"...","pack_p_html":"<p>...</p>","price_h2":"...","features":[{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"}],"clients_label":"...","clients_subtitle":"...","clients_p_html":"<p>...</p>","reviews_label":"...","testimonios_title":"...","projects_title":"...","faq_title":"...","faq":[{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"}],"final_cta_h3":"...","btn_presupuesto":"...","btn_reunion":"...","kitdigital_bold":"...","kitdigital_p_html":"<p>...</p>","btn_kitdigital":"..."}
 PROMPT;
     }
 
@@ -908,6 +881,10 @@ BRIEF:
 - Ángulo: {$angle}
 - Tono: {$tone}
 - CTA: {$cta}
+
+Reglas clave:
+- clients_subtitle debe ser MUY CORTO (6–12 palabras), no “Enfoque:”.
+- clients_p_html NO debe copiar pack_p_html.
 
 NO repetir títulos:
 {$noRepetirTitles}
@@ -934,6 +911,14 @@ NO puede haber campos vacíos ni "<p></p>".
 Keyword: {$keyword}
 Ángulo: {$angle}
 Tono: {$tone}
+
+Checklist:
+- Solo 1 H1: hero_h1 (no uses <h1>)
+- 4 features / 9 faq exactas
+- clients_subtitle MUY CORTO (6–12 palabras)
+- clients_p_html distinto a pack_p_html
+- HTML: <p>, <strong>, <br>
+- Nada vacío / nada "<p></p>"
 
 NO repetir títulos:
 {$noRepetirTitles}
@@ -980,17 +965,18 @@ BRIEF:
 - Público: {$aud}
 - CTA: {$cta}
 
+Reglas:
+- NO dejar campos vacíos.
+- clients_subtitle MUY CORTO (6–12 palabras).
+- clients_p_html NO debe copiar pack_p_html.
+- 4 features exactas y 9 FAQs exactas.
+- HTML SOLO: <p>, <strong>, <br>.
+
 NO repetir títulos:
 {$noRepetirTitles}
 
 NO repetir textos:
 {$noRepetirCorpus}
-
-Tarea:
-- Rellena campos vacíos/invalidos, mantén lo que esté bien.
-- NO dejes strings vacíos.
-- 4 features exactas y 9 FAQs exactas.
-- HTML SOLO: <p>, <strong>, <br>.
 
 JSON actual:
 {$json}
@@ -1007,7 +993,7 @@ PROMPT;
         $copy['features'] = isset($copy['features']) && is_array($copy['features']) ? $copy['features'] : [];
         $copy['faq']      = isset($copy['faq']) && is_array($copy['faq']) ? $copy['faq'] : [];
 
-        foreach (['hero_p_html','kit_p_html','pack_p_html','kitdigital_p_html'] as $k) {
+        foreach (['hero_p_html','kit_p_html','pack_p_html','clients_p_html','kitdigital_p_html'] as $k) {
             if (isset($copy[$k])) {
                 $copy[$k] = $this->keepAllowedInlineHtml($this->stripH1Tags($this->toStr($copy[$k])));
             }
@@ -1015,14 +1001,12 @@ PROMPT;
 
         if (isset($copy['seo_title'])) {
             $seo = trim(strip_tags($this->toStr($copy['seo_title'])));
-            if (mb_strlen($seo) > 65) {
-                $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
-            }
+            if (mb_strlen($seo) > 65) $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
             $copy['seo_title'] = $seo;
         }
 
-        if (is_array($copy['features']) && count($copy['features']) > 4) $copy['features'] = array_slice($copy['features'], 0, 4);
-        if (is_array($copy['faq']) && count($copy['faq']) > 9) $copy['faq'] = array_slice($copy['faq'], 0, 9);
+        if (count($copy['features']) > 4) $copy['features'] = array_slice($copy['features'], 0, 4);
+        if (count($copy['faq']) > 9) $copy['faq'] = array_slice($copy['faq'], 0, 9);
 
         return $copy;
     }
@@ -1031,14 +1015,14 @@ PROMPT;
     {
         $copy = $this->sanitizeAndNormalizeCopy($copy);
 
-        // la clave: fallback antes de validar
+        // fallback antes de validar
         $this->applyDynamicFallbacks($copy, force: true);
 
-        // validaciones
         foreach ([
             'seo_title','hero_kicker','hero_h1',
             'kit_h1','pack_h2','price_h2',
-            'clients_label','clients_subtitle','reviews_label','testimonios_title','projects_title',
+            'clients_label','clients_subtitle',
+            'reviews_label','testimonios_title','projects_title',
             'faq_title','final_cta_h3',
             'btn_presupuesto','btn_reunion',
             'kitdigital_bold','btn_kitdigital',
@@ -1046,7 +1030,7 @@ PROMPT;
             $this->requireText($copy[$k] ?? '', $k);
         }
 
-        foreach (['hero_p_html','kit_p_html','pack_p_html','kitdigital_p_html'] as $k) {
+        foreach (['hero_p_html','kit_p_html','pack_p_html','clients_p_html','kitdigital_p_html'] as $k) {
             $this->requireHtml($copy[$k] ?? '', $k);
         }
 
@@ -1068,6 +1052,11 @@ PROMPT;
             $this->requireText($q['q'] ?? '', "faq[$i].q");
             $this->requireHtml($q['a_html'] ?? '', "faq[$i].a_html");
         }
+
+        // clients_subtitle corto (doble seguro)
+        $s = trim(strip_tags($this->toStr($copy['clients_subtitle'] ?? '')));
+        $words = preg_split('~\s+~u', $s, -1, PREG_SPLIT_NO_EMPTY);
+        if ($words && count($words) > 12) $copy['clients_subtitle'] = implode(' ', array_slice($words, 0, 12));
 
         if ($this->violatesSeoHardRules($copy)) {
             throw new \RuntimeException("El JSON viola reglas SEO/H1");
@@ -1112,7 +1101,7 @@ PROMPT;
             '{{KIT_H1}}' => trim(strip_tags($this->toStr($copy['kit_h1']))),
             '{{KIT_P}}'  => $this->keepAllowedInlineHtml($this->toStr($copy['kit_p_html'])),
 
-            // FEATURES (incluye FEATURE_3_TITLE ✅)
+            // FEATURES (incluye FEATURE_3_TITLE y FEATURE_3_P ✅)
             '{{FEATURE_1_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][0]['title']))),
             '{{FEATURE_1_P}}'     => $this->keepAllowedInlineHtml($this->toStr($copy['features'][0]['p_html'])),
 
@@ -1127,9 +1116,12 @@ PROMPT;
 
             '{{FEATURES_LIST_HTML}}' => $featuresListHtml,
 
-            // CLIENTS / REVIEWS / PROJECTS ✅
+            // CLIENTS ✅ (subtitle corto + párrafo propio)
             '{{CLIENTS_LABEL}}'     => trim(strip_tags($this->toStr($copy['clients_label']))),
             '{{CLIENTS_SUBTITLE}}'  => trim(strip_tags($this->toStr($copy['clients_subtitle']))),
+            '{{CLIENTS_P}}'         => $this->keepAllowedInlineHtml($this->toStr($copy['clients_p_html'])),
+
+            // REVIEWS/PROJECTS
             '{{REVIEWS_LABEL}}'     => trim(strip_tags($this->toStr($copy['reviews_label']))),
             '{{TESTIMONIOS_TITLE}}' => trim(strip_tags($this->toStr($copy['testimonios_title']))),
             '{{PROJECTS_TITLE}}'    => trim(strip_tags($this->toStr($copy['projects_title']))),
@@ -1153,6 +1145,7 @@ PROMPT;
         // FAQ 1..9
         for ($i = 0; $i < 9; $i++) {
             $dict['{{FAQ_' . ($i + 1) . '_Q}}'] = trim(strip_tags($this->toStr($copy['faq'][$i]['q'])));
+
             $dict['{{FAQ_' . ($i + 1) . '_A}}'] = $this->keepAllowedInlineHtml($this->toStr($copy['faq'][$i]['a_html']));
         }
 
@@ -1271,6 +1264,7 @@ PROMPT;
         if (is_string($v)) return $v;
         if (is_int($v) || is_float($v)) return (string)$v;
         if (is_bool($v)) return $v ? '1' : '0';
+
         if (is_array($v)) {
             foreach (['text','content','value','html'] as $k) {
                 if (array_key_exists($k, $v)) return $this->toStr($v[$k]);
@@ -1278,11 +1272,13 @@ PROMPT;
             $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             return is_string($j) ? $j : '';
         }
+
         if (is_object($v)) {
             if ($v instanceof \Stringable) return (string)$v;
             $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             return is_string($j) ? $j : '';
         }
+
         return '';
     }
 
@@ -1413,7 +1409,8 @@ PROMPT;
         foreach ([
             'seo_title','hero_kicker','hero_h1','hero_p_html',
             'kit_h1','kit_p_html','pack_h2','pack_p_html','price_h2',
-            'clients_label','clients_subtitle','reviews_label','testimonios_title','projects_title',
+            'clients_label','clients_subtitle','clients_p_html',
+            'reviews_label','testimonios_title','projects_title',
             'faq_title','final_cta_h3','btn_presupuesto','btn_reunion',
             'kitdigital_bold','kitdigital_p_html','btn_kitdigital'
         ] as $k) {
