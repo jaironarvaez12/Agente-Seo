@@ -17,8 +17,20 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 2400;
-    public $tries = 1;
+    /**
+     * PRODUCCIÓN (mejor opción): reintentos controlados + backoff.
+     * IMPORTANTE: el worker debe tener --timeout > $timeout (ej: 5400).
+     */
+    public $timeout = 4200;          // 70 min
+    public $tries   = 5;             // reintentos controlados
+    public $backoff = [60, 120, 300, 600, 900]; // 1m,2m,5m,10m,15m
+
+    /**
+     * Para no crear filas duplicadas entre reintentos:
+     * en el primer intento se crea el registro y se guarda su ID en el job,
+     * y en reintentos se reutiliza el mismo registro.
+     */
+    public ?int $registroId = null;
 
     public function __construct(
         public string $idDominio,
@@ -29,14 +41,31 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
     public function handle(): void
     {
-        $registro = Dominios_Contenido_DetallesModel::create([
-            'id_dominio_contenido' => (int)$this->idDominioContenido,
-            'id_dominio' => (int)$this->idDominio,
-            'tipo' => $this->tipo,
-            'keyword' => $this->keyword,
-            'estatus' => 'en_proceso',
-            'modelo' => env('DEEPSEEK_MODEL', 'deepseek-chat'),
-        ]);
+        // ===========================================================
+        // Reusar registro entre reintentos (evita duplicados)
+        // ===========================================================
+        if ($this->registroId) {
+            $registro = Dominios_Contenido_DetallesModel::where('id_dominio_contenido_detalle', $this->registroId)->first();
+        } else {
+            $registro = null;
+        }
+
+        if (!$registro) {
+            $registro = Dominios_Contenido_DetallesModel::create([
+                'id_dominio_contenido' => (int)$this->idDominioContenido,
+                'id_dominio' => (int)$this->idDominio,
+                'tipo' => $this->tipo,
+                'keyword' => $this->keyword,
+                'estatus' => 'en_proceso',
+                'modelo' => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+            ]);
+            $this->registroId = (int)$registro->id_dominio_contenido_detalle;
+        } else {
+            $registro->update([
+                'estatus' => 'en_proceso',
+                'modelo' => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+            ]);
+        }
 
         try {
             $apiKey = (string) env('DEEPSEEK_API_KEY', '');
@@ -67,7 +96,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $noRepetirCorpus = $this->compactHistory($usedCorpus, 2500);
 
             // =======================================
-            // Generación con 3 intentos
+            // Generación con 3 intentos (internos)
             // =======================================
             $final = null;
 
@@ -190,7 +219,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 throw new \RuntimeException("Quedaron tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 50)));
             }
 
-            // Post-pass (plantillas viejas con textos fijos): SIN aleatoriedad, usando JSON
+            // Post-pass (plantillas viejas con textos fijos): usando JSON
             [$filled, $forcedCount] = $this->forceReplaceStaticTextsInTemplate($filled, $final);
 
             // =======================================
@@ -213,11 +242,17 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 'estatus' => 'generado',
                 'error' => null,
             ]);
+
         } catch (\Throwable $e) {
+            // Guardar error real en BD SIEMPRE
+            $isLast = ($this->attempts() >= (int)$this->tries);
+
             $registro->update([
-                'estatus' => 'error',
-                'error' => $e->getMessage(),
+                'estatus' => $isLast ? 'error_final' : 'error',
+                'error' => $e->getMessage() . ' | attempts=' . $this->attempts(),
             ]);
+
+            // En producción: relanzamos para que Laravel reintente según tries/backoff
             throw $e;
         }
     }
@@ -877,7 +912,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // Coerción segura
+    // Coerción segura + VALIDACIÓN ESTRICTA (puro generado)
     // ===========================================================
     private function toStr(mixed $v): string
     {
@@ -909,9 +944,6 @@ PROMPT;
         return '';
     }
 
-    // ===========================================================
-    // SANITIZE / VALIDATE (puro generado)
-    // ===========================================================
     private function isBlankHtml(string $html): bool
     {
         $txt = trim(preg_replace('~\s+~u', ' ', strip_tags($html)));
@@ -1158,7 +1190,6 @@ PROMPT;
     // ===========================================================
     private function fillElementorTemplate_byPrettyTokens_withStats(array $tpl, array $copy): array
     {
-        // ya viene validado arriba; igual aquí mantenemos sanity:
         $copy = $this->validateAndFixCopy($copy);
 
         $dict = $this->buildPrettyTokenDictionary($copy);
@@ -1229,7 +1260,7 @@ PROMPT;
             '{{KIT_H1}}' => $this->requireText($copy['kit_h1'] ?? '', 'kit_h1'),
             '{{KIT_P}}'  => $this->requireHtml($copy['kit_p_html'] ?? '', 'kit_p_html'),
 
-            // FEATURES (✅ incluye FEATURE_3_TITLE para que no quede token suelto)
+            // FEATURES (incluye FEATURE_3_TITLE)
             '{{FEATURE_1_TITLE}}' => $this->requireText($copy['features'][0]['title'] ?? '', 'features[0].title'),
             '{{FEATURE_1_P}}'     => $this->requireHtml($copy['features'][0]['p_html'] ?? '', 'features[0].p_html'),
 
@@ -1296,7 +1327,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // Post-pass (plantillas viejas) SIN aleatoriedad, usando JSON
+    // Post-pass (plantillas viejas) usando JSON (sin texto fijo)
     // ===========================================================
     private function forceReplaceStaticTextsInTemplate(array $tpl, array $copy): array
     {
