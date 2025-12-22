@@ -1155,7 +1155,11 @@ PROMPT;
             '{{FEATURE_1_P}}'     => $this->ensureHtml($copy['features'][0]['p_html'] ?? '', "Mejora concreta para {$kw} enfocada en conversión."),
             '{{FEATURE_2_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][1]['title'] ?? "Beneficio 2 para {$kw}"))),
             '{{FEATURE_2_P}}'     => $this->ensureHtml($copy['features'][1]['p_html'] ?? '', "Más claridad y mejores decisiones para {$kw}."),
+
+            // ✅ FIX: faltaba FEATURE_3_TITLE (causaba tokens sin reemplazar)
+            '{{FEATURE_3_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][2]['title'] ?? "Beneficio 3 para {$kw}"))),
             '{{FEATURE_3_P}}'     => $this->ensureHtml($copy['features'][2]['p_html'] ?? '', "Ejecución limpia y lista para publicar en {$kw}."),
+
             '{{FEATURE_4_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][3]['title'] ?? "Beneficio 4 para {$kw}"))),
             '{{FEATURE_4_P}}'     => $this->ensureHtml($copy['features'][3]['p_html'] ?? '', "Optimización para que {$kw} convierta mejor."),
             '{{FEATURES_LIST_HTML}}' => $featuresListHtml,
