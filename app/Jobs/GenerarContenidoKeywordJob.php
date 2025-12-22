@@ -165,7 +165,15 @@ class GenerarContenidoKeywordJob implements ShouldQueue
            [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
 
 
-            [$filled, $setCount, $idsSample] = $this->fillElementorTemplate_v64_withStats($tpl, $final);
+            [$filled, $replacedCount, $remaining] = $this->fillElementorTemplate_byPrettyTokens_withStats($tpl, $final);
+
+            if ($replacedCount < 8) {
+                throw new \RuntimeException("Template no parece tokenizado (replacedCount={$replacedCount}).");
+            }
+
+            if (count($remaining) > 0) {
+                throw new \RuntimeException("Quedaron tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 25)));
+            }
 
             // Post-pass: reemplaza textos fijos que no estén en los IDs mapeados
             [$filled, $replacedCount] = $this->forceReplaceStaticTextsInTemplate($filled, $final);
@@ -1357,10 +1365,7 @@ PROMPT;
         }
     }
 
-    private function pick(array $arr): string
-    {
-        return (string)$arr[random_int(0, max(0, count($arr) - 1))];
-    }
+   
 
     private function loadElementorTemplateForDomainWithPath(int $idDominio): array
 {
@@ -1410,4 +1415,300 @@ PROMPT;
 
     return [$tpl, $templatePath];
 }
+private function templateLooksLikeV64(array $tpl): bool
+{
+    // Si existen 2-3 IDs clave, asumimos que es v64
+    $need = ['abf38f1', '6963d8c', '22fa414a'];
+    $ids = $this->collectWidgetIds($tpl['content'] ?? []);
+    $set = array_flip($ids);
+
+    $hits = 0;
+    foreach ($need as $id) {
+        if (isset($set[$id])) $hits++;
+    }
+    return $hits >= 2;
+}
+
+private function fillElementorTemplate_byPlaceholders_withStats(array $tpl, array $copy): array
+{
+    $setCount = 0;
+
+    // Tokens que vas a poner en Elementor
+    $map = $this->buildPlaceholderMap($copy);
+
+    // Para sample/debug (no IDs, sino un sample de tokens)
+    $sample = array_slice(array_keys($map), 0, 18);
+
+    $walk = function (&$nodes) use (&$walk, $map, &$setCount) {
+        if (!is_array($nodes)) return;
+
+        foreach ($nodes as &$n) {
+            if (!is_array($n)) continue;
+
+            if (($n['elType'] ?? null) === 'widget' && isset($n['settings']) && is_array($n['settings'])) {
+                $this->replacePlaceholdersRecursive($n['settings'], $map, $setCount);
+            }
+
+            if (!empty($n['elements']) && is_array($n['elements'])) {
+                $walk($n['elements']);
+            }
+        }
+    };
+
+    if (isset($tpl['content']) && is_array($tpl['content'])) {
+        $walk($tpl['content']);
+    }
+
+    // Si no se reemplazó nada, probablemente el template no tiene tokens
+    if ($setCount < 5) {
+        throw new \RuntimeException(
+            "Template sin placeholders (o no detectados). Reemplazos={$setCount}. " .
+            "Asegúrate de usar tokens como {{HERO_H1}}, {{HERO_P}}, etc."
+        );
+    }
+
+    return [$tpl, $setCount, $sample];
+}
+
+private function buildPlaceholderMap(array $copy): array
+{
+    // Usa tu toStr() / ensureHtml() si ya los tienes
+    $kw = $this->shortKw();
+
+    $heroH1 = trim(strip_tags($this->toStr($copy['hero_h1'] ?? $kw)));
+    $heroP  = $this->toStr($copy['hero_p_html'] ?? '<p></p>');
+    $kitH1  = trim(strip_tags($this->toStr($copy['kit_h1'] ?? "Kit para {$kw}")));
+    $kitP   = $this->toStr($copy['kit_p_html'] ?? '<p></p>');
+    $packH2 = trim(strip_tags($this->toStr($copy['pack_h2'] ?? "Pack de {$kw}")));
+    $packP  = $this->toStr($copy['pack_p_html'] ?? '<p></p>');
+    $faqT   = trim(strip_tags($this->toStr($copy['faq_title'] ?? "Preguntas frecuentes sobre {$kw}")));
+    $cta    = trim(strip_tags($this->toStr($copy['final_cta_h3'] ?? "¿Listo para avanzar con {$kw}?")));
+
+    $map = [
+        '{{HERO_H1}}' => $heroH1,
+        '{{HERO_P}}'  => $heroP,
+
+        '{{KIT_H1}}'  => $kitH1,
+        '{{KIT_P}}'   => $kitP,
+
+        '{{PACK_H2}}' => $packH2,
+        '{{PACK_P}}'  => $packP,
+
+        '{{FAQ_TITLE}}' => $faqT,
+        '{{FINAL_CTA}}' => $cta,
+
+        // Botones (pon estos tokens en botones)
+        '{{BTN_PRESUPUESTO}}' => $this->pick(['Solicitar presupuesto','Pedir presupuesto','Solicitar propuesta']),
+        '{{BTN_REUNION}}'     => $this->pick(['Agendar reunión','Reservar llamada','Agendar llamada']),
+    ];
+
+    // FEATURES 1..4
+    for ($i=0; $i<4; $i++) {
+        $t = trim(strip_tags($this->toStr($copy['features'][$i]['title'] ?? "Mejora {$i} para {$kw}")));
+        $p = $this->toStr($copy['features'][$i]['p_html'] ?? '<p></p>');
+        $map['{{FEATURE_'.($i+1).'_TITLE}}'] = $t;
+        $map['{{FEATURE_'.($i+1).'_P}}']     = $p;
+    }
+
+    // FAQ 1..9
+    for ($i=0; $i<9; $i++) {
+        $q = trim(strip_tags($this->toStr($copy['faq'][$i]['q'] ?? "Pregunta {$i} sobre {$kw}")));
+        $a = $this->toStr($copy['faq'][$i]['a_html'] ?? '<p></p>');
+        $map['{{FAQ_'.($i+1).'_Q}}'] = $q;
+        $map['{{FAQ_'.($i+1).'_A}}'] = $a;
+    }
+
+    return $map;
+}
+
+private function replacePlaceholdersRecursive(array &$arr, array $map, int &$setCount): void
+{
+    foreach ($arr as $k => &$v) {
+        if (is_array($v)) {
+            $this->replacePlaceholdersRecursive($v, $map, $setCount);
+            continue;
+        }
+
+        if (!is_string($v) || $v === '') continue;
+
+        $orig = $v;
+
+        foreach ($map as $token => $replacement) {
+            if (str_contains($v, $token)) {
+                $v = str_replace($token, (string)$replacement, $v);
+            }
+        }
+
+        if ($v !== $orig) $setCount++;
+    }
+}
+private function fillElementorTemplate_byPrettyTokens_withStats(array $tpl, array $copy): array
+{
+    $dict = $this->buildPrettyTokenDictionary($copy);
+
+    $replacedCount = 0;
+
+    $walk = function (&$nodes) use (&$walk, $dict, &$replacedCount) {
+        if (!is_array($nodes)) return;
+
+        foreach ($nodes as &$n) {
+            if (!is_array($n)) continue;
+
+            // Reemplazar en settings de cualquier elemento (widget/section/column)
+            if (isset($n['settings']) && is_array($n['settings'])) {
+                $this->replacePrettyTokensRecursive($n['settings'], $dict, $replacedCount);
+            }
+
+            if (!empty($n['elements']) && is_array($n['elements'])) {
+                $walk($n['elements']);
+            }
+        }
+    };
+
+    if (isset($tpl['content']) && is_array($tpl['content'])) {
+        $walk($tpl['content']);
+    }
+
+    $remaining = $this->collectRemainingPrettyTokens($tpl);
+
+    return [$tpl, $replacedCount, $remaining];
+}
+
+private function replacePrettyTokensRecursive(array &$arr, array $dict, int &$count): void
+{
+    foreach ($arr as $k => &$v) {
+        if (is_array($v)) {
+            $this->replacePrettyTokensRecursive($v, $dict, $count);
+            continue;
+        }
+
+        if (!is_string($v) || $v === '') continue;
+        if (!str_contains($v, '{{')) continue;
+
+        $orig = $v;
+
+        foreach ($dict as $token => $rep) {
+            if (str_contains($v, $token)) {
+                $v = str_replace($token, $rep, $v);
+            }
+        }
+
+        if ($v !== $orig) $count++;
+    }
+}
+
+private function collectRemainingPrettyTokens(array $tpl): array
+{
+    $found = [];
+
+    $content = $tpl['content'] ?? [];
+    $walk = function ($nodes) use (&$walk, &$found) {
+        if (!is_array($nodes)) return;
+
+        foreach ($nodes as $n) {
+            if (!is_array($n)) continue;
+
+            if (isset($n['settings']) && is_array($n['settings'])) {
+                $this->scanStringsForTokens($n['settings'], $found);
+            }
+
+            if (!empty($n['elements']) && is_array($n['elements'])) {
+                $walk($n['elements']);
+            }
+        }
+    };
+
+    $walk($content);
+
+    $found = array_values(array_unique($found));
+    sort($found);
+    return $found;
+}
+
+private function scanStringsForTokens(array $arr, array &$found): void
+{
+    foreach ($arr as $v) {
+        if (is_array($v)) {
+            $this->scanStringsForTokens($v, $found);
+            continue;
+        }
+        if (!is_string($v) || $v === '') continue;
+
+        if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $v, $m)) {
+            foreach ($m[0] as $tok) $found[] = $tok;
+        }
+    }
+}
+
+private function buildPrettyTokenDictionary(array $copy): array
+{
+    $kw = $this->shortKw();
+
+    // helpers
+    $txt = fn($v) => trim(strip_tags((string)$v));
+    $html = fn($v) => (string)$v;
+
+    $heroH1 = $txt($copy['hero_h1'] ?? $kw);
+    $heroP  = $html($copy['hero_p_html'] ?? "<p></p>");
+    $kitH1  = $txt($copy['kit_h1'] ?? "Kit para {$kw}");
+    $kitP   = $html($copy['kit_p_html'] ?? "<p></p>");
+    $packH2 = $txt($copy['pack_h2'] ?? "Pack de {$kw}");
+    $packP  = $html($copy['pack_p_html'] ?? "<p></p>");
+    $faqT   = $txt($copy['faq_title'] ?? "Preguntas frecuentes sobre {$kw}");
+    $cta    = $txt($copy['final_cta_h3'] ?? "¿Listo para avanzar con {$kw}?");
+
+    $dict = [
+        '{{HERO_KICKER}}' => $this->pick(["Sitio web corporativo","Diseño web profesional","Web para captar clientes"]),
+        '{{HERO_H1}}'     => $heroH1,
+        '{{HERO_P}}'      => $heroP,
+
+        '{{KIT_H1}}' => $kitH1,
+        '{{KIT_P}}'  => $kitP,
+
+        '{{PACK_H2}}' => $packH2,
+        '{{PACK_P}}'  => $packP,
+
+        '{{FAQ_TITLE}}' => $faqT,
+        '{{FINAL_CTA}}' => $cta,
+
+        // Secciones que antes te quedaban fijas
+        '{{CLIENTS_LABEL}}'    => $this->pick(["Clientes","Marcas","Empresas"]),
+        '{{CLIENTS_SUBTITLE}}' => $this->pick([
+            "Empresas en toda España y el mundo ya confían en nosotros",
+            "Negocios que buscan resultados ya trabajan con nosotros",
+            "Equipos que apuestan por rendimiento y claridad",
+        ]),
+        '{{REVIEWS_LABEL}}'     => $this->pick(["Opiniones","Reseñas","Valoraciones"]),
+        '{{TESTIMONIOS_TITLE}}' => $this->pick(["Testimonios","Lo que dicen de nosotros","Experiencias reales"]),
+        '{{PROJECTS_TITLE}}'    => $this->pick([
+            "Proyectos Web Realizados: Diseño, Desarrollo y Resultados",
+            "Casos de éxito: webs listas para convertir",
+            "Trabajos recientes: estructura, diseño y conversión",
+        ]),
+
+        // Botones
+        '{{BTN_PRESUPUESTO}}' => $this->pick(["Solicitar presupuesto","Pedir presupuesto","Solicitar propuesta"]),
+        '{{BTN_REUNION}}'     => $this->pick(["Agendar reunión","Reservar llamada","Agendar llamada"]),
+    ];
+
+    // FEATURES 1..4
+    for ($i=0; $i<4; $i++) {
+        $dict['{{FEATURE_'.($i+1).'_TITLE}}'] = $txt($copy['features'][$i]['title'] ?? "Beneficio ".($i+1)." para {$kw}");
+        $dict['{{FEATURE_'.($i+1).'_P}}']     = $html($copy['features'][$i]['p_html'] ?? "<p></p>");
+    }
+
+    // FAQ 1..9
+    for ($i=0; $i<9; $i++) {
+        $dict['{{FAQ_'.($i+1).'_Q}}'] = $txt($copy['faq'][$i]['q'] ?? "Pregunta ".($i+1)." sobre {$kw}");
+        $dict['{{FAQ_'.($i+1).'_A}}'] = $html($copy['faq'][$i]['a_html'] ?? "<p></p>");
+    }
+
+    return $dict;
+}
+
+private function pick(array $arr): string
+{
+    return $arr[random_int(0, count($arr) - 1)];
+}
+
 }

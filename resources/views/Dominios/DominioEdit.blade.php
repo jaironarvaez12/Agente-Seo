@@ -66,11 +66,11 @@
                                 </div>
                                 @php
                                 // Opciones: puedes moverlo a config/elementor.php si quieres.
-                                $plantillas = [
-                                    'elementor/elementor-64.json' => 'Plantilla 64 (Servicios + FAQ)',
-                                    'elementor/elementor-65.json' => 'Plantilla 65 (Corporativa)',
-                                    'elementor/elementor-landing.json' => 'Landing (CTA fuerte)',
+                               $plantillas = [
+                                'elementor/elementor-64-pretty.json' => 'Plantilla 64 (tokens bonitos)',
+                                'elementor/elementor-65-pretty.json' => 'Plantilla 65 (tokens bonitos)',
                                 ];
+
 
                                 $selectedTpl = old('elementor_template_path', $dominio->elementor_template_path ?? '');
                                 @endphp
