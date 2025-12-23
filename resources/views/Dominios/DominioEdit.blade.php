@@ -69,6 +69,8 @@
                                $plantillas = [
                                 'elementor/elementor-64-pretty.json' => 'Plantilla 64 (tokens bonitos)',
                                 'elementor/elementor-65-pretty.json' => 'Plantilla 65 (tokens bonitos)',
+                                'elementor/elementor-66.json' => 'Plantilla 66 (tokens bonitos)',
+                                'elementor/elementor-67.json' => 'Plantilla 67 (tokens bonitos)',
                                 ];
 
 
