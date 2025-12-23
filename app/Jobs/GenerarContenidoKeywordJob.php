@@ -30,7 +30,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         public string $tipo,
         public string $keyword
     ) {
-        // ✅ 1 registro por EJECUCIÓN (no por keyword), pero reintentos reutilizan el mismo
+        // ✅ Nuevo por cada dispatch, NO por keyword (evita reescritura)
         $this->jobUuid = (string) Str::uuid(); // 36 chars
     }
 
@@ -39,9 +39,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         $registro = null;
 
         try {
-            // ===========================================================
-            // 1) Crear/recuperar registro SOLO por job_uuid (para retries)
-            // ===========================================================
+            // 1) Crear/recuperar SOLO por job_uuid (para retries del mismo job)
             $registro = $this->getOrCreateRegistroByJobUuid();
 
             Log::info('GenerarContenidoKeywordJob START', [
@@ -54,19 +52,15 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 'keyword' => $this->keyword,
             ]);
 
-            // ===========================================================
-            // 2) DeepSeek config
-            // ===========================================================
+            // 2) Config DeepSeek
             $apiKey = (string) env('DEEPSEEK_API_KEY', '');
             $model  = (string) env('DEEPSEEK_MODEL', 'deepseek-chat');
 
             if ($apiKey === '') {
-                throw new \RuntimeException('DEEPSEEK_API_KEY no configurado');
+                throw new \RuntimeException('NO_RETRY: DEEPSEEK_API_KEY no configurado');
             }
 
-            // ===========================================================
-            // 3) Historial (para evitar repetición)
-            // ===========================================================
+            // 3) Historial para evitar repetición
             $prev = Dominios_Contenido_DetallesModel::where('id_dominio_contenido', (int)$this->idDominioContenido)
                 ->whereNotNull('draft_html')
                 ->orderByDesc('id_dominio_contenido_detalle')
@@ -84,25 +78,20 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $noRepetirTitles = implode(' | ', array_slice(array_filter($usedTitles), 0, 12));
             $noRepetirCorpus = $this->compactHistory($usedCorpus, 2500);
 
-            // ===========================================================
-            // 4) Cargar template + map (si existe)
-            // ===========================================================
+            // 4) Template + map
             [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
             $map = $this->loadTokenMapIfExists($tplPath); // puede ser null
 
-            // ===========================================================
-            // 5) Construir blueprint robusto (map + inferencia desde template)
-            // ===========================================================
+            // 5) Tokens reales en template (normaliza {{ H_01 }} => {{H_01}})
             $tokensInTpl = $this->collectRemainingTokensDeep($tpl);
             if (count($tokensInTpl) === 0) {
-                throw new \RuntimeException("No encontré tokens {{...}} en el template: {$tplPath}");
+                throw new \RuntimeException("NO_RETRY: Template sin tokens {{...}}: {$tplPath}");
             }
 
+            // 6) Blueprint robusto (map + inferencia)
             $blueprint = $this->buildBlueprintFromTemplateAndMap($tpl, $tokensInTpl, $map);
 
-            // ===========================================================
-            // 6) Generar copy para tokens (con 2 PASADAS si faltan)
-            // ===========================================================
+            // 7) Generar copy (1 llamada + 1 “missing” si hace falta)
             $copy = $this->generateCopyForBlueprint(
                 $apiKey,
                 $model,
@@ -111,7 +100,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 $noRepetirCorpus
             );
 
-            // Si faltan tokens, pedir solo los faltantes y merge (1 vez)
             $missing = $this->findMissingTokensInCopy($tokensInTpl, $copy);
             if (!empty($missing)) {
                 $copy2 = $this->generateMissingOnly(
@@ -126,64 +114,72 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
                 $missing2 = $this->findMissingTokensInCopy($tokensInTpl, $copy);
                 if (!empty($missing2)) {
-                    throw new \RuntimeException("DeepSeek no devolvió todos los tokens. Faltan: " . implode(' | ', array_slice($missing2, 0, 60)));
+                    throw new \RuntimeException("NO_RETRY: DeepSeek no devolvió tokens: " . implode(' | ', array_slice($missing2, 0, 80)));
                 }
             }
 
-            // ===========================================================
-            // 7) Reemplazar tokens (normaliza {{ H_01 }} => {{H_01}})
-            // ===========================================================
+            // 8) Rellenar template
             [$filled, $replacedCount, $remaining] = $this->fillTemplateByTokensWithStats($tpl, $copy);
 
-            if ($replacedCount === 0) {
-                throw new \RuntimeException("No se reemplazó ningún token. Revisa que el template use {{TOKEN}}. Template: {$tplPath}");
-            }
-
+            // ✅ Ya NO usamos el bug de replacedCount < 8 (eso rompía plantillas pequeñas)
             if (!empty($remaining)) {
-                throw new \RuntimeException("Quedaron tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 80)));
+                throw new \RuntimeException("NO_RETRY: Quedaron tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 80)));
             }
 
-            // ===========================================================
-            // 8) Title + slug
-            // ===========================================================
+            // 9) Title + slug
             $title = trim(strip_tags((string)($copy['seo_title'] ?? $this->keyword)));
             if ($title === '') $title = $this->keyword;
 
             $slugBase = Str::slug($title ?: $this->keyword);
             $slug = $slugBase . '-' . $registro->id_dominio_contenido_detalle;
 
-            // meta opcionales si quieres guardarlos
             $metaTitle = $this->sanitizeSeoTitle((string)($copy['seo_title'] ?? $title), $this->keyword);
             $metaDesc  = $this->sanitizeMetaDescription((string)($copy['meta_description'] ?? ''), $this->keyword);
 
-            // ===========================================================
-            // 9) Guardar en BD
-            // ===========================================================
+            // 10) Guardar
             $registro->update([
-                'title'          => $title,
-                'slug'           => $slug,
-                'meta_title'     => $metaTitle,
+                'title'            => $title,
+                'slug'             => $slug,
+                'meta_title'       => $metaTitle,
                 'meta_description' => $metaDesc !== '' ? $metaDesc : null,
-                'draft_html'     => json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'contenido_html' => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'estatus'        => 'generado',
-                'error'          => null,
+                'draft_html'       => json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'contenido_html'   => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'estatus'          => 'generado',
+                'error'            => null,
+            ]);
+
+            Log::info('GenerarContenidoKeywordJob DONE', [
+                'job_uuid' => $this->jobUuid,
+                'detalle_id' => $registro->id_dominio_contenido_detalle ?? null,
+                'replacedCount' => $replacedCount,
+                'tokensCount' => count($tokensInTpl),
             ]);
 
         } catch (\Throwable $e) {
             if ($registro) {
                 $isLast = ($this->attempts() >= (int)$this->tries);
+
+                // Si es NO_RETRY, lo marcamos final de una vez y NO reintentamos.
+                $noRetry = str_contains($e->getMessage(), 'NO_RETRY:');
+
                 $registro->update([
-                    'estatus' => $isLast ? 'error_final' : 'error',
+                    'estatus' => ($noRetry || $isLast) ? 'error_final' : 'error',
                     'error'   => $e->getMessage() . ' | attempts=' . $this->attempts(),
                 ]);
+
+                if ($noRetry) {
+                    // ✅ corta reintentos
+                    $this->fail($e);
+                    return;
+                }
             }
+
             throw $e;
         }
     }
 
     // ===========================================================
-    // 1 registro por job_uuid (para retries). NO reescribe otros runs.
+    // Crea/recupera registro por job_uuid (solo para retries del mismo job)
     // ===========================================================
     private function getOrCreateRegistroByJobUuid(): Dominios_Contenido_DetallesModel
     {
@@ -208,16 +204,16 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     }
 
     // ===========================================================
-    // Load Elementor template
+    // Template loading
     // ===========================================================
     private function loadElementorTemplateForDomainWithPath(int $idDominio): array
     {
         $dominio = DominiosModel::where('id_dominio', $idDominio)->first();
-        if (!$dominio) throw new \RuntimeException("Dominio no encontrado (id={$idDominio})");
+        if (!$dominio) throw new \RuntimeException("NO_RETRY: Dominio no encontrado (id={$idDominio})");
 
         $templateRel = trim((string)($dominio->elementor_template_path ?? ''));
         if ($templateRel === '') $templateRel = trim((string) env('ELEMENTOR_TEMPLATE_PATH', ''));
-        if ($templateRel === '') throw new \RuntimeException('No hay plantilla configurada (dominio ni env ELEMENTOR_TEMPLATE_PATH).');
+        if ($templateRel === '') throw new \RuntimeException('NO_RETRY: No hay plantilla configurada (dominio ni env ELEMENTOR_TEMPLATE_PATH).');
 
         $templateRel = str_replace(['https:', 'http:'], '', $templateRel);
 
@@ -229,16 +225,16 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         $templateRel = preg_replace('~^/?storage/app/~i', '', $templateRel);
         $templateRel = ltrim(str_replace('\\', '/', $templateRel), '/');
 
-        if (str_contains($templateRel, '..')) throw new \RuntimeException('Template path inválido (no se permite "..")');
+        if (str_contains($templateRel, '..')) throw new \RuntimeException('NO_RETRY: Template path inválido (no se permite "..")');
 
         $templatePath = storage_path('app/' . $templateRel);
-        if (!is_file($templatePath)) throw new \RuntimeException("No existe el template en disco: {$templatePath} (path={$templateRel})");
+        if (!is_file($templatePath)) throw new \RuntimeException("NO_RETRY: No existe el template en disco: {$templatePath} (path={$templateRel})");
 
         $raw = (string) file_get_contents($templatePath);
         $tpl = json_decode($raw, true);
 
         if (!is_array($tpl) || !isset($tpl['content']) || !is_array($tpl['content'])) {
-            throw new \RuntimeException('Template Elementor inválido: debe contener "content" (array).');
+            throw new \RuntimeException('NO_RETRY: Template Elementor inválido: debe contener "content" (array).');
         }
 
         return [$tpl, $templatePath];
@@ -256,18 +252,18 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     }
 
     // ===========================================================
-    // Blueprint robusto: usa map si existe + inferencia por widgetType del template
+    // Blueprint: map + inferencia desde JSON (widgetType + original)
     // ===========================================================
     private function buildBlueprintFromTemplateAndMap(array $tpl, array $tokensInTpl, ?array $map): array
     {
         $bp = [];
 
-        // 1) Desde map
         if (is_array($map)) {
             foreach ($map as $item) {
                 if (!is_array($item)) continue;
                 $tok = (string)($item['token'] ?? '');
-                if ($tok === '' || !in_array($tok, $tokensInTpl, true)) continue;
+                if ($tok === '') continue;
+                if (!in_array($tok, $tokensInTpl, true)) continue;
 
                 $bp[$tok] = [
                     'token' => $tok,
@@ -277,7 +273,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             }
         }
 
-        // 2) Inferencia desde el JSON de Elementor (aunque no haya map)
         $inferred = $this->inferTokenContextsFromTemplate($tpl);
 
         foreach ($tokensInTpl as $tok) {
@@ -309,7 +304,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 $widgetType = $node['widgetType'];
             }
 
-            foreach ($node as $k => $v) {
+            foreach ($node as $v) {
                 if (is_string($v) && str_contains($v, '{{')) {
                     $norm = $this->normalizeTokenSpacing($v);
                     if (preg_match_all('/\{\{[A-Za-z0-9_]+\}\}/', $norm, $m)) {
@@ -330,18 +325,11 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
         $walk($tpl, null);
 
-        // Normaliza widgetType a los tipos que tú ya manejas
-        foreach ($found as $tok => $ctx) {
-            $wt = (string)($ctx['widgetType'] ?? 'unknown');
-            // algunos widgets reales de Elementor: heading, text-editor, button, icon-list, etc.
-            $found[$tok]['widgetType'] = $wt;
-        }
-
         return $found;
     }
 
     // ===========================================================
-    // Generación copy (mejor prompt + postprocesos)
+    // Copy generation
     // ===========================================================
     private function generateCopyForBlueprint(
         string $apiKey,
@@ -358,30 +346,18 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $noRepetirCorpus
         );
 
-        $raw = $this->deepseekText(
-            $apiKey,
-            $model,
-            $prompt,
-            maxTokens: 3800,
-            temperature: 0.70,
-            topP: 0.90,
-            jsonMode: true
-        );
-
+        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 3600, temperature: 0.70, topP: 0.90, jsonMode: true);
         $copy = $this->safeParseJsonObject($apiKey, $model, $raw);
 
-        // Postprocesos mínimos + fallbacks por token
         $out = [];
         $out['seo_title'] = $this->sanitizeSeoTitle((string)($copy['seo_title'] ?? $this->keyword), $this->keyword);
         $out['meta_description'] = $this->sanitizeMetaDescription((string)($copy['meta_description'] ?? ''), $this->keyword);
 
         foreach ($blueprint as $b) {
-            $tok  = (string)($b['token'] ?? '');
+            $tok = (string)($b['token'] ?? '');
             if ($tok === '') continue;
-
             $type = (string)($b['widgetType'] ?? 'unknown');
-            $val  = isset($copy[$tok]) ? (string)$copy[$tok] : '';
-
+            $val = isset($copy[$tok]) ? (string)$copy[$tok] : '';
             $out[$tok] = $this->normalizeByWidgetTypeAndToken($tok, $type, $val);
         }
 
@@ -396,13 +372,14 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         string $noRepetirTitles,
         string $noRepetirCorpus
     ): array {
-        $missingBp = [];
         $bpByToken = [];
         foreach ($blueprint as $b) {
             if (!empty($b['token'])) $bpByToken[$b['token']] = $b;
         }
+
+        $missingBp = [];
         foreach ($missingTokens as $tok) {
-            $missingBp[] = $bpByToken[$tok] ?? ['token'=>$tok,'widgetType'=>'unknown','original'=>''];
+            $missingBp[] = $bpByToken[$tok] ?? ['token' => $tok, 'widgetType' => 'unknown', 'original' => ''];
         }
 
         $bpShort = mb_substr(json_encode($missingBp, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 9000);
@@ -455,7 +432,7 @@ PROMPT;
 Devuelve SOLO JSON válido (sin markdown, sin explicación). RESPUESTA MINIFICADA.
 
 Idioma: Español.
-Objetivo: Reemplazar TODOS los tokens del template por textos nuevos, claros y útiles, sin relleno.
+Objetivo: Reemplazar TODOS los tokens del template por textos nuevos, claros, útiles y coherentes con el "original".
 
 Keyword: {$keyword}
 Tipo: {$tipo}
@@ -466,21 +443,19 @@ NO repetir títulos:
 NO repetir frases/subtemas:
 {$noRepetirCorpus}
 
-REGLAS IMPORTANTES:
-- Devuelve "seo_title" (60–65 chars aprox) y "meta_description" (130–155 chars).
+REGLAS:
+- Devuelve "seo_title" (60–65 chars) y "meta_description" (130–155 chars).
 - Para cada token del blueprint, devuelve una key EXACTA igual al token (ej "{{H_01}}") con su valor.
-- Usa el campo "original" como referencia de intención (pero reescribe mejor y con sentido).
 - heading: frase corta; puede usar <strong>; NO uses <h1>/<h2>.
-- text-editor: HTML permitido SOLO <p>, <strong>, <br>. 2–4 párrafos cortos, concretos (no humo).
+- text-editor: HTML SOLO <p>, <strong>, <br>. 2–4 párrafos cortos, concretos (no humo).
 - button: 2–4 palabras, sin HTML.
 - icon-list: muy corto, sin HTML (2–6 palabras máximo).
-- Evita repetir keyword literal demasiadas veces; usa variaciones semánticas.
 - Nada vacío, nada "<p></p>", nada incoherente.
 
 BLUEPRINT (token, widgetType, original):
 {$bpShort}
 
-Formato de respuesta:
+Formato:
 {"seo_title":"...","meta_description":"...","{{H_01}}":"...","{{P_01}}":"<p>...</p>","{{BTN_01}}":"..."}
 PROMPT;
     }
@@ -489,7 +464,6 @@ PROMPT;
     {
         $val = (string)$val;
 
-        // Heurística por prefijo si widgetType es unknown
         if ($type === '' || $type === 'unknown') {
             if (str_starts_with($tok, '{{H_')) $type = 'heading';
             elseif (str_starts_with($tok, '{{P_')) $type = 'text-editor';
@@ -499,8 +473,8 @@ PROMPT;
         if ($type === 'text-editor') {
             $val = $this->keepAllowedInlineHtml($val);
             if ($this->isBlankHtml($val)) {
-                $val = "<p>Información clara y práctica sobre " . htmlspecialchars($this->keyword, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ".</p>"
-                     . "<p>Contenido listo para publicar y optimizado para el usuario.</p>";
+                $kw = htmlspecialchars($this->keyword, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                $val = "<p>Información clara y práctica sobre {$kw}.</p><p>Contenido listo para publicar, enfocado en resolver dudas reales.</p>";
             }
         } elseif ($type === 'button') {
             $val = trim(strip_tags($val));
@@ -516,7 +490,6 @@ PROMPT;
             if ($val === '') $val = "Guía sobre " . mb_substr($this->keyword, 0, 55);
             if (mb_strlen(strip_tags($val)) > 75) $val = mb_substr(strip_tags($val), 0, 75);
         } else {
-            // fallback genérico
             $val = $this->keepAllowedInlineStrong($val);
             if (trim(strip_tags($val)) === '') $val = "Contenido para " . mb_substr($this->keyword, 0, 55);
         }
@@ -538,7 +511,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // Reemplazo tokens + stats (normaliza espacios)
+    // Replace + token collection (con normalización de espacios)
     // ===========================================================
     private function fillTemplateByTokensWithStats(array $tpl, array $copy): array
     {
@@ -563,8 +536,7 @@ PROMPT;
             }
         }
 
-        $seo = (string)($copy['seo_title'] ?? $this->keyword);
-        $dict['{{SEO_TITLE}}'] = $seo;
+        $dict['{{SEO_TITLE}}'] = (string)($copy['seo_title'] ?? $this->keyword);
 
         return $dict;
     }
@@ -581,9 +553,7 @@ PROMPT;
 
         $orig = $node;
 
-        // Normaliza tokens con espacios: {{ H_01 }} => {{H_01}}
         $node = $this->normalizeTokenSpacing($node);
-
         $node = strtr($node, $dict);
 
         if ($node !== $orig) $count++;
@@ -615,7 +585,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // DeepSeek
+    // DeepSeek (timeout controlado)
     // ===========================================================
     private function deepseekText(
         string $apiKey,
@@ -626,13 +596,11 @@ PROMPT;
         float $topP = 0.92,
         bool $jsonMode = true
     ): string {
-        $nonce = 'nonce:' . Str::uuid()->toString();
-
         $payload = [
             'model' => $model,
             'messages' => [
                 ['role' => 'system', 'content' => 'Devuelves SOLO JSON válido. No markdown. No explicaciones.'],
-                ['role' => 'user', 'content' => $prompt . "\n\n" . $nonce],
+                ['role' => 'user', 'content' => $prompt],
             ],
             'temperature' => $temperature,
             'top_p' => $topP,
@@ -649,31 +617,17 @@ PROMPT;
                 'Content-Type' => 'application/json',
             ])
             ->connectTimeout(15)
-            ->timeout(180)
+            ->timeout(140) // ⬅️ controlado, no se queda “eterno”
             ->retry(0, 0)
             ->post('https://api.deepseek.com/v1/chat/completions', $payload);
 
-        if (!$resp->successful() && $jsonMode) {
-            $body = (string)$resp->body();
-            if (str_contains($body, 'response_format') || str_contains($body, 'unknown') || str_contains($body, 'invalid')) {
-                unset($payload['response_format']);
-                $resp = Http::withHeaders([
-                        'Authorization' => 'Bearer ' . $apiKey,
-                        'Accept' => 'application/json',
-                        'Content-Type' => 'application/json',
-                    ])
-                    ->connectTimeout(15)
-                    ->timeout(180)
-                    ->retry(0, 0)
-                    ->post('https://api.deepseek.com/v1/chat/completions', $payload);
-            }
+        if (!$resp->successful()) {
+            throw new \RuntimeException("DeepSeek error {$resp->status()}: {$resp->body()}");
         }
-
-        if (!$resp->successful()) throw new \RuntimeException("DeepSeek error {$resp->status()}: {$resp->body()}");
 
         $data = $resp->json();
         $text = trim((string)($data['choices'][0]['message']['content'] ?? ''));
-        if ($text === '') throw new \RuntimeException("DeepSeek returned empty text.");
+        if ($text === '') throw new \RuntimeException("NO_RETRY: DeepSeek returned empty text.");
 
         return $text;
     }
@@ -683,14 +637,9 @@ PROMPT;
         try {
             return $this->parseJsonStrict($raw);
         } catch (\Throwable $e) {
-            $repair = <<<PROMPT
-Devuelve SOLO JSON válido. Sin markdown. RESPUESTA MINIFICADA.
-Repara este output para que sea un JSON objeto válido.
-OUTPUT ROTO:
-{$raw}
-PROMPT;
-
-            $fixed = $this->deepseekText($apiKey, $model, $repair, maxTokens: 2000, temperature: 0.10, topP: 0.90, jsonMode: true);
+            // 1 repair
+            $repair = "Devuelve SOLO JSON válido minificado. Repara este output:\n{$raw}";
+            $fixed = $this->deepseekText($apiKey, $model, $repair, maxTokens: 1800, temperature: 0.10, topP: 0.90, jsonMode: true);
             return $this->parseJsonStrict($fixed);
         }
     }
@@ -711,7 +660,7 @@ PROMPT;
         $data = json_decode($raw, true);
         if (!is_array($data)) {
             $snip = mb_substr($raw, 0, 700);
-            throw new \RuntimeException('DeepSeek no devolvió JSON válido. Snippet: ' . $snip);
+            throw new \RuntimeException('NO_RETRY: DeepSeek no devolvió JSON válido. Snippet: ' . $snip);
         }
         return $data;
     }
@@ -799,15 +748,15 @@ PROMPT;
     private function sanitizeMetaDescription(string $desc, string $fallbackKw): string
     {
         $desc = trim(strip_tags((string)$desc));
-        if ($desc === '') return '';
         $desc = preg_replace('~\s+~u', ' ', $desc);
+        if ($desc === '') return '';
+
         if (mb_strlen($desc) > 155) $desc = rtrim(mb_substr($desc, 0, 155), " \t\n\r\0\x0B-–—|:");
         if (mb_strlen($desc) < 90) {
-            // mínimo decente
-            $desc = $desc . ' ' . mb_substr("Guía práctica sobre {$fallbackKw}.", 0, 60);
-            $desc = trim($desc);
+            $desc = trim($desc . ' Guía práctica sobre ' . mb_substr($fallbackKw, 0, 40) . '.');
             if (mb_strlen($desc) > 155) $desc = mb_substr($desc, 0, 155);
         }
+
         return $desc;
     }
 }
