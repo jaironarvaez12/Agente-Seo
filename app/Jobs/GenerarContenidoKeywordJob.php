@@ -4,7 +4,6 @@ namespace App\Jobs;
 
 use Illuminate\Bus\Queueable;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Queue\InteractsWithQueue;
@@ -31,13 +30,8 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         public string $tipo,
         public string $keyword
     ) {
-        // ✅ DEDUPE: 1 registro por (dominio_contenido + dominio + tipo + keyword)
-        $this->jobUuid = sha1(
-            (int)$this->idDominio . '|' .
-            (int)$this->idDominioContenido . '|' .
-            trim(mb_strtolower($this->keyword)) . '|' .
-            trim(mb_strtolower($this->tipo))
-        );
+        // ✅ 1 registro por EJECUCIÓN (no por keyword), pero reintentos reutilizan el mismo
+        $this->jobUuid = (string) Str::uuid(); // 36 chars
     }
 
     public function handle(): void
@@ -46,9 +40,19 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
         try {
             // ===========================================================
-            // 1) Crear/recuperar registro (IDEMPOTENTE y seguro en concurrencia)
+            // 1) Crear/recuperar registro SOLO por job_uuid (para retries)
             // ===========================================================
-            $registro = $this->getOrCreateRegistro();
+            $registro = $this->getOrCreateRegistroByJobUuid();
+
+            Log::info('GenerarContenidoKeywordJob START', [
+                'job_uuid' => $this->jobUuid,
+                'detalle_id' => $registro->id_dominio_contenido_detalle ?? null,
+                'attempts' => $this->attempts(),
+                'idDominio' => $this->idDominio,
+                'idDominioContenido' => $this->idDominioContenido,
+                'tipo' => $this->tipo,
+                'keyword' => $this->keyword,
+            ]);
 
             // ===========================================================
             // 2) DeepSeek config
@@ -84,36 +88,63 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             // 4) Cargar template + map (si existe)
             // ===========================================================
             [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
-
             $map = $this->loadTokenMapIfExists($tplPath); // puede ser null
 
             // ===========================================================
-            // 5) Generar copy para tokens (UNIVERSAL)
+            // 5) Construir blueprint robusto (map + inferencia desde template)
             // ===========================================================
-            $copy = $this->generateCopyForTemplateTokens(
+            $tokensInTpl = $this->collectRemainingTokensDeep($tpl);
+            if (count($tokensInTpl) === 0) {
+                throw new \RuntimeException("No encontré tokens {{...}} en el template: {$tplPath}");
+            }
+
+            $blueprint = $this->buildBlueprintFromTemplateAndMap($tpl, $tokensInTpl, $map);
+
+            // ===========================================================
+            // 6) Generar copy para tokens (con 2 PASADAS si faltan)
+            // ===========================================================
+            $copy = $this->generateCopyForBlueprint(
                 $apiKey,
                 $model,
-                $map,
-                $tpl,
+                $blueprint,
                 $noRepetirTitles,
                 $noRepetirCorpus
             );
 
+            // Si faltan tokens, pedir solo los faltantes y merge (1 vez)
+            $missing = $this->findMissingTokensInCopy($tokensInTpl, $copy);
+            if (!empty($missing)) {
+                $copy2 = $this->generateMissingOnly(
+                    $apiKey,
+                    $model,
+                    $blueprint,
+                    $missing,
+                    $noRepetirTitles,
+                    $noRepetirCorpus
+                );
+                $copy = array_merge($copy, $copy2);
+
+                $missing2 = $this->findMissingTokensInCopy($tokensInTpl, $copy);
+                if (!empty($missing2)) {
+                    throw new \RuntimeException("DeepSeek no devolvió todos los tokens. Faltan: " . implode(' | ', array_slice($missing2, 0, 60)));
+                }
+            }
+
             // ===========================================================
-            // 6) Reemplazar tokens
+            // 7) Reemplazar tokens (normaliza {{ H_01 }} => {{H_01}})
             // ===========================================================
             [$filled, $replacedCount, $remaining] = $this->fillTemplateByTokensWithStats($tpl, $copy);
 
-            if ($replacedCount < 8) {
-                throw new \RuntimeException("Template no parece tokenizado (replacedCount={$replacedCount}). Template: {$tplPath}");
+            if ($replacedCount === 0) {
+                throw new \RuntimeException("No se reemplazó ningún token. Revisa que el template use {{TOKEN}}. Template: {$tplPath}");
             }
 
             if (!empty($remaining)) {
-                throw new \RuntimeException("Quedaron tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 50)));
+                throw new \RuntimeException("Quedaron tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 80)));
             }
 
             // ===========================================================
-            // 7) Title + slug (seo_title o keyword)
+            // 8) Title + slug
             // ===========================================================
             $title = trim(strip_tags((string)($copy['seo_title'] ?? $this->keyword)));
             if ($title === '') $title = $this->keyword;
@@ -121,16 +152,22 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $slugBase = Str::slug($title ?: $this->keyword);
             $slug = $slugBase . '-' . $registro->id_dominio_contenido_detalle;
 
+            // meta opcionales si quieres guardarlos
+            $metaTitle = $this->sanitizeSeoTitle((string)($copy['seo_title'] ?? $title), $this->keyword);
+            $metaDesc  = $this->sanitizeMetaDescription((string)($copy['meta_description'] ?? ''), $this->keyword);
+
             // ===========================================================
-            // 8) Guardar en BD
+            // 9) Guardar en BD
             // ===========================================================
             $registro->update([
-                'title' => $title,
-                'slug' => $slug,
-                'draft_html' => json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'title'          => $title,
+                'slug'           => $slug,
+                'meta_title'     => $metaTitle,
+                'meta_description' => $metaDesc !== '' ? $metaDesc : null,
+                'draft_html'     => json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                 'contenido_html' => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'estatus' => 'generado',
-                'error' => null,
+                'estatus'        => 'generado',
+                'error'          => null,
             ]);
 
         } catch (\Throwable $e) {
@@ -138,44 +175,36 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 $isLast = ($this->attempts() >= (int)$this->tries);
                 $registro->update([
                     'estatus' => $isLast ? 'error_final' : 'error',
-                    'error' => $e->getMessage() . ' | attempts=' . $this->attempts(),
+                    'error'   => $e->getMessage() . ' | attempts=' . $this->attempts(),
                 ]);
             }
-
             throw $e;
         }
     }
 
     // ===========================================================
-    // Registro idempotente (1 solo registro por job_uuid)
+    // 1 registro por job_uuid (para retries). NO reescribe otros runs.
     // ===========================================================
-    private function getOrCreateRegistro(): Dominios_Contenido_DetallesModel
+    private function getOrCreateRegistroByJobUuid(): Dominios_Contenido_DetallesModel
     {
         $existing = Dominios_Contenido_DetallesModel::where('job_uuid', $this->jobUuid)->first();
         if ($existing) {
             $existing->update([
                 'estatus' => 'en_proceso',
-                'modelo' => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+                'modelo'  => env('DEEPSEEK_MODEL', 'deepseek-chat'),
             ]);
             return $existing;
         }
 
-        try {
-            return Dominios_Contenido_DetallesModel::create([
-                'job_uuid' => $this->jobUuid,
-                'id_dominio_contenido' => (int)$this->idDominioContenido,
-                'id_dominio' => (int)$this->idDominio,
-                'tipo' => $this->tipo,
-                'keyword' => $this->keyword,
-                'estatus' => 'en_proceso',
-                'modelo' => env('DEEPSEEK_MODEL', 'deepseek-chat'),
-            ]);
-        } catch (\Throwable $e) {
-            // Si hubo condición de carrera (2 workers), recupera el existente
-            $again = Dominios_Contenido_DetallesModel::where('job_uuid', $this->jobUuid)->first();
-            if ($again) return $again;
-            throw $e;
-        }
+        return Dominios_Contenido_DetallesModel::create([
+            'job_uuid'             => $this->jobUuid,
+            'id_dominio_contenido'  => (int)$this->idDominioContenido,
+            'id_dominio'            => (int)$this->idDominio,
+            'tipo'                  => $this->tipo,
+            'keyword'               => $this->keyword,
+            'estatus'               => 'en_proceso',
+            'modelo'                => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+        ]);
     }
 
     // ===========================================================
@@ -215,9 +244,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         return [$tpl, $templatePath];
     }
 
-    // ===========================================================
-    // Cargar map si existe: template.json => template.map.json
-    // ===========================================================
     private function loadTokenMapIfExists(string $templatePath): ?array
     {
         $mapPath = preg_replace('~\.json$~i', '.map.json', $templatePath);
@@ -230,31 +256,20 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     }
 
     // ===========================================================
-    // Generar copy UNIVERSAL para cualquier template tokenizado
-    // - Si hay map: genera por token según widgetType y original.
-    // - Si NO hay map: genera fallback genérico por tokens detectados.
+    // Blueprint robusto: usa map si existe + inferencia por widgetType del template
     // ===========================================================
-    private function generateCopyForTemplateTokens(
-        string $apiKey,
-        string $model,
-        ?array $map,
-        array $tpl,
-        string $noRepetirTitles,
-        string $noRepetirCorpus
-    ): array {
-        // 1) Tokens presentes en template
-        $tokensInTpl = $this->collectRemainingTokensDeep($tpl);
+    private function buildBlueprintFromTemplateAndMap(array $tpl, array $tokensInTpl, ?array $map): array
+    {
+        $bp = [];
 
-        // 2) Blueprint (token -> tipo + original)
-        $blueprint = [];
-
+        // 1) Desde map
         if (is_array($map)) {
             foreach ($map as $item) {
                 if (!is_array($item)) continue;
                 $tok = (string)($item['token'] ?? '');
                 if ($tok === '' || !in_array($tok, $tokensInTpl, true)) continue;
 
-                $blueprint[] = [
+                $bp[$tok] = [
                     'token' => $tok,
                     'widgetType' => (string)($item['widgetType'] ?? 'unknown'),
                     'original' => (string)($item['original'] ?? ''),
@@ -262,15 +277,79 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             }
         }
 
-        // 3) Si map no cubre todo, añade tokens faltantes como unknown
-        $bpTokens = array_map(fn($x) => $x['token'], $blueprint);
+        // 2) Inferencia desde el JSON de Elementor (aunque no haya map)
+        $inferred = $this->inferTokenContextsFromTemplate($tpl);
+
         foreach ($tokensInTpl as $tok) {
-            if (!in_array($tok, $bpTokens, true)) {
-                $blueprint[] = ['token' => $tok, 'widgetType' => 'unknown', 'original' => ''];
+            if (isset($bp[$tok])) continue;
+
+            if (isset($inferred[$tok])) {
+                $bp[$tok] = [
+                    'token' => $tok,
+                    'widgetType' => (string)($inferred[$tok]['widgetType'] ?? 'unknown'),
+                    'original' => (string)($inferred[$tok]['original'] ?? ''),
+                ];
+            } else {
+                $bp[$tok] = ['token' => $tok, 'widgetType' => 'unknown', 'original' => ''];
             }
         }
 
-        // 4) Prompt (1 llamada + 1 repair máximo)
+        return array_values($bp);
+    }
+
+    private function inferTokenContextsFromTemplate(array $tpl): array
+    {
+        $found = [];
+
+        $walk = function ($node, $currentWidgetType = null) use (&$walk, &$found) {
+            if (!is_array($node)) return;
+
+            $widgetType = $currentWidgetType;
+            if (isset($node['widgetType']) && is_string($node['widgetType'])) {
+                $widgetType = $node['widgetType'];
+            }
+
+            foreach ($node as $k => $v) {
+                if (is_string($v) && str_contains($v, '{{')) {
+                    $norm = $this->normalizeTokenSpacing($v);
+                    if (preg_match_all('/\{\{[A-Za-z0-9_]+\}\}/', $norm, $m)) {
+                        foreach ($m[0] as $tok) {
+                            if (!isset($found[$tok])) {
+                                $found[$tok] = [
+                                    'widgetType' => $widgetType ?? 'unknown',
+                                    'original' => $v,
+                                ];
+                            }
+                        }
+                    }
+                } elseif (is_array($v)) {
+                    $walk($v, $widgetType);
+                }
+            }
+        };
+
+        $walk($tpl, null);
+
+        // Normaliza widgetType a los tipos que tú ya manejas
+        foreach ($found as $tok => $ctx) {
+            $wt = (string)($ctx['widgetType'] ?? 'unknown');
+            // algunos widgets reales de Elementor: heading, text-editor, button, icon-list, etc.
+            $found[$tok]['widgetType'] = $wt;
+        }
+
+        return $found;
+    }
+
+    // ===========================================================
+    // Generación copy (mejor prompt + postprocesos)
+    // ===========================================================
+    private function generateCopyForBlueprint(
+        string $apiKey,
+        string $model,
+        array $blueprint,
+        string $noRepetirTitles,
+        string $noRepetirCorpus
+    ): array {
         $prompt = $this->promptUniversalTokenCopy(
             $this->keyword,
             $this->tipo,
@@ -279,55 +358,85 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $noRepetirCorpus
         );
 
-        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 3600, temperature: 0.75, topP: 0.90, jsonMode: true);
+        $raw = $this->deepseekText(
+            $apiKey,
+            $model,
+            $prompt,
+            maxTokens: 3800,
+            temperature: 0.70,
+            topP: 0.90,
+            jsonMode: true
+        );
 
-        $copy = $this->safeParseJsonObject($apiKey, $model, $raw, $prompt);
+        $copy = $this->safeParseJsonObject($apiKey, $model, $raw);
 
-        // 5) Validación mínima + fallbacks por token
+        // Postprocesos mínimos + fallbacks por token
         $out = [];
         $out['seo_title'] = $this->sanitizeSeoTitle((string)($copy['seo_title'] ?? $this->keyword), $this->keyword);
+        $out['meta_description'] = $this->sanitizeMetaDescription((string)($copy['meta_description'] ?? ''), $this->keyword);
 
         foreach ($blueprint as $b) {
-            $tok = $b['token'];
-            $type = $b['widgetType'];
+            $tok  = (string)($b['token'] ?? '');
+            if ($tok === '') continue;
 
-            $val = isset($copy[$tok]) ? (string)$copy[$tok] : '';
+            $type = (string)($b['widgetType'] ?? 'unknown');
+            $val  = isset($copy[$tok]) ? (string)$copy[$tok] : '';
 
-            if ($type === 'text-editor') {
-                $val = $this->keepAllowedInlineHtml($val);
-                if ($this->isBlankHtml($val)) {
-                    $val = "<p>" . htmlspecialchars($this->keyword, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . " — contenido listo para publicar.</p>";
-                }
-            } elseif ($type === 'button') {
-                $val = trim(strip_tags($val));
-                if ($val === '') $val = $this->pick(["Ver más","Saber más","Empezar","Contactar"]);
-                if (mb_strlen($val) > 22) $val = mb_substr($val, 0, 22);
-            } elseif ($type === 'icon-list') {
-                $val = trim(strip_tags($val));
-                if ($val === '') $val = $this->pick(["Rápido","Claro","Optimizado","Listo para publicar"]);
-                if (mb_strlen($val) > 55) $val = mb_substr($val, 0, 55);
-            } elseif ($type === 'heading') {
-                $val = $this->keepAllowedInlineStrong($val);
-                $val = trim($val);
-                if ($val === '') $val = "Sección para " . mb_substr($this->keyword, 0, 50);
-                if (mb_strlen(strip_tags($val)) > 70) {
-                    $val = mb_substr(strip_tags($val), 0, 70);
-                }
-            } else {
-                // unknown: decide por prefijo
-                if (str_starts_with($tok, '{{BTN_')) {
-                    $val = trim(strip_tags($val));
-                    if ($val === '') $val = $this->pick(["Ver más","Saber más","Empezar","Contactar"]);
-                } elseif (str_starts_with($tok, '{{P_')) {
-                    $val = $this->keepAllowedInlineHtml($val);
-                    if ($this->isBlankHtml($val)) $val = "<p>Contenido útil y claro sobre {$this->keyword}.</p>";
-                } else {
-                    $val = $this->keepAllowedInlineStrong($val);
-                    if (trim(strip_tags($val)) === '') $val = "Contenido listo para " . mb_substr($this->keyword, 0, 50);
-                }
-            }
+            $out[$tok] = $this->normalizeByWidgetTypeAndToken($tok, $type, $val);
+        }
 
-            $out[$tok] = $val;
+        return $out;
+    }
+
+    private function generateMissingOnly(
+        string $apiKey,
+        string $model,
+        array $blueprint,
+        array $missingTokens,
+        string $noRepetirTitles,
+        string $noRepetirCorpus
+    ): array {
+        $missingBp = [];
+        $bpByToken = [];
+        foreach ($blueprint as $b) {
+            if (!empty($b['token'])) $bpByToken[$b['token']] = $b;
+        }
+        foreach ($missingTokens as $tok) {
+            $missingBp[] = $bpByToken[$tok] ?? ['token'=>$tok,'widgetType'=>'unknown','original'=>''];
+        }
+
+        $bpShort = mb_substr(json_encode($missingBp, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 9000);
+
+        $prompt = <<<PROMPT
+Devuelve SOLO JSON válido (sin markdown) MINIFICADO.
+Genera SOLO estos tokens faltantes (no incluyas otros keys).
+Idioma: Español.
+Keyword: {$this->keyword}
+Tipo: {$this->tipo}
+
+NO repetir títulos:
+{$noRepetirTitles}
+
+NO repetir frases/subtemas:
+{$noRepetirCorpus}
+
+Blueprint (token, widgetType, original):
+{$bpShort}
+
+Formato:
+{"{{TOKEN_1}}":"...","{{TOKEN_2}}":"..."}
+PROMPT;
+
+        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 2000, temperature: 0.45, topP: 0.90, jsonMode: true);
+        $obj = $this->safeParseJsonObject($apiKey, $model, $raw);
+
+        $out = [];
+        foreach ($missingBp as $b) {
+            $tok = (string)($b['token'] ?? '');
+            if ($tok === '') continue;
+            $type = (string)($b['widgetType'] ?? 'unknown');
+            $val  = isset($obj[$tok]) ? (string)$obj[$tok] : '';
+            $out[$tok] = $this->normalizeByWidgetTypeAndToken($tok, $type, $val);
         }
 
         return $out;
@@ -343,9 +452,10 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         $bpShort = mb_substr(json_encode($blueprint, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 9500);
 
         return <<<PROMPT
-Devuelve SOLO JSON válido (sin markdown, sin explicación). RESPUESTA MINIFICADA (sin saltos de línea).
+Devuelve SOLO JSON válido (sin markdown, sin explicación). RESPUESTA MINIFICADA.
 
-Objetivo: Reemplazar TODOS los tokens del template por textos nuevos y variados, útiles para cualquier tipo de plantilla.
+Idioma: Español.
+Objetivo: Reemplazar TODOS los tokens del template por textos nuevos, claros y útiles, sin relleno.
 
 Keyword: {$keyword}
 Tipo: {$tipo}
@@ -356,26 +466,79 @@ NO repetir títulos:
 NO repetir frases/subtemas:
 {$noRepetirCorpus}
 
-REGLAS:
-- Debes devolver "seo_title" (60–65 chars aprox).
+REGLAS IMPORTANTES:
+- Devuelve "seo_title" (60–65 chars aprox) y "meta_description" (130–155 chars).
 - Para cada token del blueprint, devuelve una key EXACTA igual al token (ej "{{H_01}}") con su valor.
-- heading: texto corto, puede usar <strong>, NO uses <h1>/<h2>.
-- text-editor: HTML permitido SOLO <p>, <strong>, <br>. Debe ser útil, sin relleno, sin promesas falsas.
+- Usa el campo "original" como referencia de intención (pero reescribe mejor y con sentido).
+- heading: frase corta; puede usar <strong>; NO uses <h1>/<h2>.
+- text-editor: HTML permitido SOLO <p>, <strong>, <br>. 2–4 párrafos cortos, concretos (no humo).
 - button: 2–4 palabras, sin HTML.
-- icon-list: muy corto, sin HTML.
-- Evita keyword stuffing: usa variaciones semánticas, pero mantén relevancia.
-- Nada vacío. No uses "<p></p>".
+- icon-list: muy corto, sin HTML (2–6 palabras máximo).
+- Evita repetir keyword literal demasiadas veces; usa variaciones semánticas.
+- Nada vacío, nada "<p></p>", nada incoherente.
 
 BLUEPRINT (token, widgetType, original):
 {$bpShort}
 
 Formato de respuesta:
-{"seo_title":"...","{{H_01}}":"...","{{P_01}}":"<p>...</p>","{{BTN_01}}":"..."}
+{"seo_title":"...","meta_description":"...","{{H_01}}":"...","{{P_01}}":"<p>...</p>","{{BTN_01}}":"..."}
 PROMPT;
     }
 
+    private function normalizeByWidgetTypeAndToken(string $tok, string $type, string $val): string
+    {
+        $val = (string)$val;
+
+        // Heurística por prefijo si widgetType es unknown
+        if ($type === '' || $type === 'unknown') {
+            if (str_starts_with($tok, '{{H_')) $type = 'heading';
+            elseif (str_starts_with($tok, '{{P_')) $type = 'text-editor';
+            elseif (str_starts_with($tok, '{{BTN_')) $type = 'button';
+        }
+
+        if ($type === 'text-editor') {
+            $val = $this->keepAllowedInlineHtml($val);
+            if ($this->isBlankHtml($val)) {
+                $val = "<p>Información clara y práctica sobre " . htmlspecialchars($this->keyword, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ".</p>"
+                     . "<p>Contenido listo para publicar y optimizado para el usuario.</p>";
+            }
+        } elseif ($type === 'button') {
+            $val = trim(strip_tags($val));
+            if ($val === '') $val = $this->pick(["Ver más","Saber más","Empezar","Contactar"]);
+            if (mb_strlen($val) > 24) $val = mb_substr($val, 0, 24);
+        } elseif ($type === 'icon-list') {
+            $val = trim(strip_tags($val));
+            if ($val === '') $val = $this->pick(["Rápido","Claro","Optimizado","Listo"]);
+            if (mb_strlen($val) > 55) $val = mb_substr($val, 0, 55);
+        } elseif ($type === 'heading') {
+            $val = $this->keepAllowedInlineStrong($val);
+            $val = trim($val);
+            if ($val === '') $val = "Guía sobre " . mb_substr($this->keyword, 0, 55);
+            if (mb_strlen(strip_tags($val)) > 75) $val = mb_substr(strip_tags($val), 0, 75);
+        } else {
+            // fallback genérico
+            $val = $this->keepAllowedInlineStrong($val);
+            if (trim(strip_tags($val)) === '') $val = "Contenido para " . mb_substr($this->keyword, 0, 55);
+        }
+
+        return $val;
+    }
+
+    private function findMissingTokensInCopy(array $tokensInTpl, array $copy): array
+    {
+        $missing = [];
+        foreach ($tokensInTpl as $tok) {
+            if (!array_key_exists($tok, $copy)) $missing[] = $tok;
+            else {
+                $v = (string)$copy[$tok];
+                if (trim(strip_tags($v)) === '') $missing[] = $tok;
+            }
+        }
+        return $missing;
+    }
+
     // ===========================================================
-    // Reemplazo tokens + stats
+    // Reemplazo tokens + stats (normaliza espacios)
     // ===========================================================
     private function fillTemplateByTokensWithStats(array $tpl, array $copy): array
     {
@@ -394,13 +557,12 @@ PROMPT;
         $dict = [];
 
         foreach ($copy as $k => $v) {
-            if ($k === 'seo_title') continue;
+            if ($k === 'seo_title' || $k === 'meta_description') continue;
             if (is_string($k) && str_starts_with($k, '{{') && str_ends_with($k, '}}')) {
                 $dict[$k] = (string)$v;
             }
         }
 
-        // fallback por si hay tokens estándar (si en alguna plantilla los usas)
         $seo = (string)($copy['seo_title'] ?? $this->keyword);
         $dict['{{SEO_TITLE}}'] = $seo;
 
@@ -418,8 +580,18 @@ PROMPT;
         if (!str_contains($node, '{{')) return;
 
         $orig = $node;
+
+        // Normaliza tokens con espacios: {{ H_01 }} => {{H_01}}
+        $node = $this->normalizeTokenSpacing($node);
+
         $node = strtr($node, $dict);
+
         if ($node !== $orig) $count++;
+    }
+
+    private function normalizeTokenSpacing(string $s): string
+    {
+        return (string) preg_replace('/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/', '{{$1}}', $s);
     }
 
     private function collectRemainingTokensDeep(mixed $node): array
@@ -428,7 +600,13 @@ PROMPT;
         $walk = function ($n) use (&$walk, &$found) {
             if (is_array($n)) { foreach ($n as $v) $walk($v); return; }
             if (!is_string($n) || $n === '') return;
-            if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $n, $m)) foreach ($m[0] as $tok) $found[] = $tok;
+            if (!str_contains($n, '{{')) return;
+
+            $n = $this->normalizeTokenSpacing($n);
+
+            if (preg_match_all('/\{\{[A-Za-z0-9_]+\}\}/', $n, $m)) {
+                foreach ($m[0] as $tok) $found[] = $tok;
+            }
         };
         $walk($node);
         $found = array_values(array_unique($found));
@@ -500,12 +678,11 @@ PROMPT;
         return $text;
     }
 
-    private function safeParseJsonObject(string $apiKey, string $model, string $raw, string $promptForRepair): array
+    private function safeParseJsonObject(string $apiKey, string $model, string $raw): array
     {
         try {
             return $this->parseJsonStrict($raw);
         } catch (\Throwable $e) {
-            // 1 repair
             $repair = <<<PROMPT
 Devuelve SOLO JSON válido. Sin markdown. RESPUESTA MINIFICADA.
 Repara este output para que sea un JSON objeto válido.
@@ -514,7 +691,6 @@ OUTPUT ROTO:
 PROMPT;
 
             $fixed = $this->deepseekText($apiKey, $model, $repair, maxTokens: 2000, temperature: 0.10, topP: 0.90, jsonMode: true);
-
             return $this->parseJsonStrict($fixed);
         }
     }
@@ -571,7 +747,7 @@ PROMPT;
 
         $parts = [];
         foreach ($arr as $k => $v) {
-            if ($k === 'seo_title') $parts[] = strip_tags((string)$v);
+            if ($k === 'seo_title' || $k === 'meta_description') $parts[] = strip_tags((string)$v);
             if (is_string($k) && str_starts_with($k, '{{')) {
                 $parts[] = strip_tags((string)$v);
             }
@@ -609,7 +785,7 @@ PROMPT;
     {
         $clean = strip_tags((string)$html, '<strong><br>');
         $clean = preg_replace('~\s+~u', ' ', $clean);
-        return trim((string)$clean);
+        return trim($clean);
     }
 
     private function sanitizeSeoTitle(string $seo, string $fallbackKw): string
@@ -618,5 +794,20 @@ PROMPT;
         if ($seo === '') $seo = trim($fallbackKw);
         if (mb_strlen($seo) > 65) $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
         return $seo;
+    }
+
+    private function sanitizeMetaDescription(string $desc, string $fallbackKw): string
+    {
+        $desc = trim(strip_tags((string)$desc));
+        if ($desc === '') return '';
+        $desc = preg_replace('~\s+~u', ' ', $desc);
+        if (mb_strlen($desc) > 155) $desc = rtrim(mb_substr($desc, 0, 155), " \t\n\r\0\x0B-–—|:");
+        if (mb_strlen($desc) < 90) {
+            // mínimo decente
+            $desc = $desc . ' ' . mb_substr("Guía práctica sobre {$fallbackKw}.", 0, 60);
+            $desc = trim($desc);
+            if (mb_strlen($desc) > 155) $desc = mb_substr($desc, 0, 155);
+        }
+        return $desc;
     }
 }
