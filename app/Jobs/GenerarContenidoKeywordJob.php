@@ -23,6 +23,8 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     public $backoff = [60, 120, 300, 600, 900];
 
     public string $jobUuid;
+    public ?int $registroId = null;
+    private array $briefContext = [];
 
     public function __construct(
         public string $idDominio,
@@ -30,8 +32,13 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         public string $tipo,
         public string $keyword
     ) {
-        // ✅ Nuevo por cada dispatch, NO por keyword (evita reescritura)
-        $this->jobUuid = (string) Str::uuid(); // 36 chars
+        // ✅ Idempotencia REAL por input, pero compatible con char(36)
+        $base = (int)$this->idDominioContenido . '|' .
+                (int)$this->idDominio . '|' .
+                trim((string)$this->tipo) . '|' .
+                mb_strtolower(trim((string)$this->keyword));
+
+        $this->jobUuid = $this->uuid36FromMd5(md5($base)); // 36 chars
     }
 
     public function handle(): void
@@ -39,28 +46,35 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         $registro = null;
 
         try {
-            // 1) Crear/recuperar SOLO por job_uuid (para retries del mismo job)
-            $registro = $this->getOrCreateRegistroByJobUuid();
+            // ===========================================================
+            // 1) Registro idempotente + seguro en concurrencia
+            // ===========================================================
+            $registro = $this->getOrCreateRegistro();
+            $this->registroId = (int)$registro->id_dominio_contenido_detalle;
 
-            Log::info('GenerarContenidoKeywordJob START', [
-                'job_uuid' => $this->jobUuid,
-                'detalle_id' => $registro->id_dominio_contenido_detalle ?? null,
-                'attempts' => $this->attempts(),
-                'idDominio' => $this->idDominio,
-                'idDominioContenido' => $this->idDominioContenido,
-                'tipo' => $this->tipo,
-                'keyword' => $this->keyword,
+            // Si ya está generado, NO regenerar (idempotencia)
+            if ($registro->estatus === 'generado' && !empty($registro->contenido_html)) {
+                return;
+            }
+
+            $registro->update([
+                'estatus' => 'en_proceso',
+                'modelo'  => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+                'error'   => null,
             ]);
 
-            // 2) Config DeepSeek
+            // ===========================================================
+            // 2) Config IA
+            // ===========================================================
             $apiKey = (string) env('DEEPSEEK_API_KEY', '');
             $model  = (string) env('DEEPSEEK_MODEL', 'deepseek-chat');
-
             if ($apiKey === '') {
                 throw new \RuntimeException('NO_RETRY: DEEPSEEK_API_KEY no configurado');
             }
 
-            // 3) Historial para evitar repetición
+            // ===========================================================
+            // 3) Historial anti-repetición
+            // ===========================================================
             $prev = Dominios_Contenido_DetallesModel::where('id_dominio_contenido', (int)$this->idDominioContenido)
                 ->whereNotNull('draft_html')
                 ->orderByDesc('id_dominio_contenido_detalle')
@@ -78,88 +92,109 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $noRepetirTitles = implode(' | ', array_slice(array_filter($usedTitles), 0, 12));
             $noRepetirCorpus = $this->compactHistory($usedCorpus, 2500);
 
-            // 4) Template + map
-            [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
-            $map = $this->loadTokenMapIfExists($tplPath); // puede ser null
+            // ===========================================================
+            // 4) Generación: redactor -> auditor -> repair (hasta 3 ciclos)
+            // ===========================================================
+            $final = null;
 
-            // 5) Tokens reales en template (normaliza {{ H_01 }} => {{H_01}})
-            $tokensInTpl = $this->collectRemainingTokensDeep($tpl);
-            if (count($tokensInTpl) === 0) {
-                throw new \RuntimeException("NO_RETRY: Template sin tokens {{...}}: {$tplPath}");
-            }
+            for ($attempt = 1; $attempt <= 3; $attempt++) {
+                $brief = $this->creativeBrief($this->keyword);
+                $this->briefContext = $brief;
 
-            // 6) Blueprint robusto (map + inferencia)
-            $blueprint = $this->buildBlueprintFromTemplateAndMap($tpl, $tokensInTpl, $map);
-
-            // 7) Generar copy (1 llamada + 1 “missing” si hace falta)
-            $copy = $this->generateCopyForBlueprint(
-                $apiKey,
-                $model,
-                $blueprint,
-                $noRepetirTitles,
-                $noRepetirCorpus
-            );
-
-            $missing = $this->findMissingTokensInCopy($tokensInTpl, $copy);
-            if (!empty($missing)) {
-                $copy2 = $this->generateMissingOnly(
-                    $apiKey,
-                    $model,
-                    $blueprint,
-                    $missing,
+                // REDACTOR
+                $draftPrompt = $this->promptRedactorJson(
+                    $this->tipo,
+                    $this->keyword,
                     $noRepetirTitles,
-                    $noRepetirCorpus
+                    $noRepetirCorpus,
+                    $brief
                 );
-                $copy = array_merge($copy, $copy2);
 
-                $missing2 = $this->findMissingTokensInCopy($tokensInTpl, $copy);
-                if (!empty($missing2)) {
-                    throw new \RuntimeException("NO_RETRY: DeepSeek no devolvió tokens: " . implode(' | ', array_slice($missing2, 0, 80)));
+                $draftRaw = $this->deepseekText($apiKey, $model, $draftPrompt, maxTokens: 3200, temperature: 0.92, topP: 0.90, jsonMode: true);
+                $draftArr = $this->safeParseOrRepair($apiKey, $model, $draftRaw, $brief);
+                $draftArr = $this->validateOrRepairCopy($apiKey, $model, $draftArr, $brief, 'redactor', $noRepetirTitles, $noRepetirCorpus);
+
+                // AUDITOR
+                $auditPrompt = $this->promptAuditorJson(
+                    $this->tipo,
+                    $this->keyword,
+                    $draftArr,
+                    $noRepetirTitles,
+                    $noRepetirCorpus,
+                    $brief
+                );
+
+                $auditedRaw = $this->deepseekText($apiKey, $model, $auditPrompt, maxTokens: 3400, temperature: 0.85, topP: 0.90, jsonMode: true);
+                $candidateArr = $this->safeParseOrRepair($apiKey, $model, $auditedRaw, $brief);
+                $candidateArr = $this->validateOrRepairCopy($apiKey, $model, $candidateArr, $brief, 'auditor', $noRepetirTitles, $noRepetirCorpus);
+
+                // REPAIR si viola o es demasiado similar
+                if ($this->violatesSeoHardRules($candidateArr) || $this->isTooSimilarToAnyPrevious($candidateArr, $usedTitles, $usedCorpus)) {
+                    $repairPrompt = $this->promptRepairJson($this->keyword, $candidateArr, $noRepetirTitles, $noRepetirCorpus, $brief);
+                    $repairRaw = $this->deepseekText($apiKey, $model, $repairPrompt, maxTokens: 3400, temperature: 0.25, topP: 0.90, jsonMode: true);
+                    $candidateArr = $this->safeParseOrRepair($apiKey, $model, $repairRaw, $brief);
+                    $candidateArr = $this->validateOrRepairCopy($apiKey, $model, $candidateArr, $brief, 'repair', $noRepetirTitles, $noRepetirCorpus);
                 }
+
+                $final = $candidateArr;
+
+                if (!$this->isTooSimilarToAnyPrevious($candidateArr, $usedTitles, $usedCorpus) && !$this->violatesSeoHardRules($candidateArr)) {
+                    break;
+                }
+
+                // alimentar historial para el siguiente ciclo
+                $usedTitles[] = $this->toStr($candidateArr['seo_title'] ?? $candidateArr['hero_h1'] ?? '');
+                $usedCorpus[] = $this->copyTextFromArray($candidateArr);
+                $noRepetirTitles = implode(' | ', array_slice(array_filter($usedTitles), 0, 12));
+                $noRepetirCorpus = $this->compactHistory($usedCorpus, 2500);
             }
 
-            // 8) Rellenar template
-            [$filled, $replacedCount, $remaining] = $this->fillTemplateByTokensWithStats($tpl, $copy);
+            if (!is_array($final)) {
+                throw new \RuntimeException('No se pudo generar contenido final');
+            }
 
-            // ✅ Ya NO usamos el bug de replacedCount < 8 (eso rompía plantillas pequeñas)
+            // ===========================================================
+            // 5) Template + reemplazo tokens
+            // ===========================================================
+            [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
+
+            [$filled, $replacedCount, $remaining] = $this->fillElementorTemplate_byPrettyTokens_withStats($tpl, $final);
+
+            // ✅ NO uses umbral fijo ">=8" (eso rompe plantillas pequeñas)
+            if ($replacedCount < 1) {
+                throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Template: {$tplPath}");
+            }
             if (!empty($remaining)) {
-                throw new \RuntimeException("NO_RETRY: Quedaron tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 80)));
+                throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 50)));
             }
 
-            // 9) Title + slug
-            $title = trim(strip_tags((string)($copy['seo_title'] ?? $this->keyword)));
+            // Post-pass para textos fijos comunes (sin romper nada)
+            [$filled, $forcedCount] = $this->forceReplaceStaticTextsInTemplate($filled, $final);
+
+            // ===========================================================
+            // 6) Title + slug
+            // ===========================================================
+            $title = trim(strip_tags($this->toStr($final['seo_title'] ?? $final['hero_h1'] ?? $this->keyword)));
             if ($title === '') $title = $this->keyword;
 
             $slugBase = Str::slug($title ?: $this->keyword);
             $slug = $slugBase . '-' . $registro->id_dominio_contenido_detalle;
 
-            $metaTitle = $this->sanitizeSeoTitle((string)($copy['seo_title'] ?? $title), $this->keyword);
-            $metaDesc  = $this->sanitizeMetaDescription((string)($copy['meta_description'] ?? ''), $this->keyword);
-
-            // 10) Guardar
+            // ===========================================================
+            // 7) Guardar
+            // ===========================================================
             $registro->update([
-                'title'            => $title,
-                'slug'             => $slug,
-                'meta_title'       => $metaTitle,
-                'meta_description' => $metaDesc !== '' ? $metaDesc : null,
-                'draft_html'       => json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'contenido_html'   => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'estatus'          => 'generado',
-                'error'            => null,
-            ]);
-
-            Log::info('GenerarContenidoKeywordJob DONE', [
-                'job_uuid' => $this->jobUuid,
-                'detalle_id' => $registro->id_dominio_contenido_detalle ?? null,
-                'replacedCount' => $replacedCount,
-                'tokensCount' => count($tokensInTpl),
+                'title'         => $title,
+                'slug'          => $slug,
+                'draft_html'    => json_encode($final, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'contenido_html'=> json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'estatus'       => 'generado',
+                'error'         => null,
             ]);
 
         } catch (\Throwable $e) {
             if ($registro) {
                 $isLast = ($this->attempts() >= (int)$this->tries);
-
-                // Si es NO_RETRY, lo marcamos final de una vez y NO reintentamos.
                 $noRetry = str_contains($e->getMessage(), 'NO_RETRY:');
 
                 $registro->update([
@@ -168,43 +203,52 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 ]);
 
                 if ($noRetry) {
-                    // ✅ corta reintentos
                     $this->fail($e);
                     return;
                 }
             }
-
             throw $e;
         }
     }
 
     // ===========================================================
-    // Crea/recupera registro por job_uuid (solo para retries del mismo job)
+    // Registro idempotente (job_uuid UNIQUE)
     // ===========================================================
-    private function getOrCreateRegistroByJobUuid(): Dominios_Contenido_DetallesModel
+    private function getOrCreateRegistro(): Dominios_Contenido_DetallesModel
     {
         $existing = Dominios_Contenido_DetallesModel::where('job_uuid', $this->jobUuid)->first();
-        if ($existing) {
-            $existing->update([
-                'estatus' => 'en_proceso',
-                'modelo'  => env('DEEPSEEK_MODEL', 'deepseek-chat'),
-            ]);
-            return $existing;
-        }
+        if ($existing) return $existing;
 
-        return Dominios_Contenido_DetallesModel::create([
-            'job_uuid'             => $this->jobUuid,
-            'id_dominio_contenido'  => (int)$this->idDominioContenido,
-            'id_dominio'            => (int)$this->idDominio,
-            'tipo'                  => $this->tipo,
-            'keyword'               => $this->keyword,
-            'estatus'               => 'en_proceso',
-            'modelo'                => env('DEEPSEEK_MODEL', 'deepseek-chat'),
-        ]);
+        try {
+            return Dominios_Contenido_DetallesModel::create([
+                'job_uuid'            => $this->jobUuid,
+                'id_dominio_contenido' => (int)$this->idDominioContenido,
+                'id_dominio'           => (int)$this->idDominio,
+                'tipo'                 => $this->tipo,
+                'keyword'              => $this->keyword,
+                'estatus'              => 'en_proceso',
+                'modelo'               => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+            ]);
+        } catch (\Throwable $e) {
+            // si otro worker ganó la carrera por UNIQUE
+            $again = Dominios_Contenido_DetallesModel::where('job_uuid', $this->jobUuid)->first();
+            if ($again) return $again;
+            throw $e;
+        }
+    }
+
+    private function uuid36FromMd5(string $md5): string
+    {
+        // 32 hex -> 36 con guiones estilo uuid
+        return substr($md5, 0, 8) . '-' .
+               substr($md5, 8, 4) . '-' .
+               substr($md5, 12, 4) . '-' .
+               substr($md5, 16, 4) . '-' .
+               substr($md5, 20, 12);
     }
 
     // ===========================================================
-    // Template loading
+    // TEMPLATE LOADER
     // ===========================================================
     private function loadElementorTemplateForDomainWithPath(int $idDominio): array
     {
@@ -228,7 +272,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         if (str_contains($templateRel, '..')) throw new \RuntimeException('NO_RETRY: Template path inválido (no se permite "..")');
 
         $templatePath = storage_path('app/' . $templateRel);
-        if (!is_file($templatePath)) throw new \RuntimeException("NO_RETRY: No existe el template en disco: {$templatePath} (path={$templateRel})");
+        if (!is_file($templatePath)) throw new \RuntimeException("NO_RETRY: No existe el template en disco: {$templatePath}");
 
         $raw = (string) file_get_contents($templatePath);
         $tpl = json_decode($raw, true);
@@ -240,352 +284,8 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         return [$tpl, $templatePath];
     }
 
-    private function loadTokenMapIfExists(string $templatePath): ?array
-    {
-        $mapPath = preg_replace('~\.json$~i', '.map.json', $templatePath);
-        if (!$mapPath || !is_file($mapPath)) return null;
-
-        $raw = (string) file_get_contents($mapPath);
-        $arr = json_decode($raw, true);
-
-        return is_array($arr) ? $arr : null;
-    }
-
     // ===========================================================
-    // Blueprint: map + inferencia desde JSON (widgetType + original)
-    // ===========================================================
-    private function buildBlueprintFromTemplateAndMap(array $tpl, array $tokensInTpl, ?array $map): array
-    {
-        $bp = [];
-
-        if (is_array($map)) {
-            foreach ($map as $item) {
-                if (!is_array($item)) continue;
-                $tok = (string)($item['token'] ?? '');
-                if ($tok === '') continue;
-                if (!in_array($tok, $tokensInTpl, true)) continue;
-
-                $bp[$tok] = [
-                    'token' => $tok,
-                    'widgetType' => (string)($item['widgetType'] ?? 'unknown'),
-                    'original' => (string)($item['original'] ?? ''),
-                ];
-            }
-        }
-
-        $inferred = $this->inferTokenContextsFromTemplate($tpl);
-
-        foreach ($tokensInTpl as $tok) {
-            if (isset($bp[$tok])) continue;
-
-            if (isset($inferred[$tok])) {
-                $bp[$tok] = [
-                    'token' => $tok,
-                    'widgetType' => (string)($inferred[$tok]['widgetType'] ?? 'unknown'),
-                    'original' => (string)($inferred[$tok]['original'] ?? ''),
-                ];
-            } else {
-                $bp[$tok] = ['token' => $tok, 'widgetType' => 'unknown', 'original' => ''];
-            }
-        }
-
-        return array_values($bp);
-    }
-
-    private function inferTokenContextsFromTemplate(array $tpl): array
-    {
-        $found = [];
-
-        $walk = function ($node, $currentWidgetType = null) use (&$walk, &$found) {
-            if (!is_array($node)) return;
-
-            $widgetType = $currentWidgetType;
-            if (isset($node['widgetType']) && is_string($node['widgetType'])) {
-                $widgetType = $node['widgetType'];
-            }
-
-            foreach ($node as $v) {
-                if (is_string($v) && str_contains($v, '{{')) {
-                    $norm = $this->normalizeTokenSpacing($v);
-                    if (preg_match_all('/\{\{[A-Za-z0-9_]+\}\}/', $norm, $m)) {
-                        foreach ($m[0] as $tok) {
-                            if (!isset($found[$tok])) {
-                                $found[$tok] = [
-                                    'widgetType' => $widgetType ?? 'unknown',
-                                    'original' => $v,
-                                ];
-                            }
-                        }
-                    }
-                } elseif (is_array($v)) {
-                    $walk($v, $widgetType);
-                }
-            }
-        };
-
-        $walk($tpl, null);
-
-        return $found;
-    }
-
-    // ===========================================================
-    // Copy generation
-    // ===========================================================
-    private function generateCopyForBlueprint(
-        string $apiKey,
-        string $model,
-        array $blueprint,
-        string $noRepetirTitles,
-        string $noRepetirCorpus
-    ): array {
-        $prompt = $this->promptUniversalTokenCopy(
-            $this->keyword,
-            $this->tipo,
-            $blueprint,
-            $noRepetirTitles,
-            $noRepetirCorpus
-        );
-
-        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 3600, temperature: 0.70, topP: 0.90, jsonMode: true);
-        $copy = $this->safeParseJsonObject($apiKey, $model, $raw);
-
-        $out = [];
-        $out['seo_title'] = $this->sanitizeSeoTitle((string)($copy['seo_title'] ?? $this->keyword), $this->keyword);
-        $out['meta_description'] = $this->sanitizeMetaDescription((string)($copy['meta_description'] ?? ''), $this->keyword);
-
-        foreach ($blueprint as $b) {
-            $tok = (string)($b['token'] ?? '');
-            if ($tok === '') continue;
-            $type = (string)($b['widgetType'] ?? 'unknown');
-            $val = isset($copy[$tok]) ? (string)$copy[$tok] : '';
-            $out[$tok] = $this->normalizeByWidgetTypeAndToken($tok, $type, $val);
-        }
-
-        return $out;
-    }
-
-    private function generateMissingOnly(
-        string $apiKey,
-        string $model,
-        array $blueprint,
-        array $missingTokens,
-        string $noRepetirTitles,
-        string $noRepetirCorpus
-    ): array {
-        $bpByToken = [];
-        foreach ($blueprint as $b) {
-            if (!empty($b['token'])) $bpByToken[$b['token']] = $b;
-        }
-
-        $missingBp = [];
-        foreach ($missingTokens as $tok) {
-            $missingBp[] = $bpByToken[$tok] ?? ['token' => $tok, 'widgetType' => 'unknown', 'original' => ''];
-        }
-
-        $bpShort = mb_substr(json_encode($missingBp, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 9000);
-
-        $prompt = <<<PROMPT
-Devuelve SOLO JSON válido (sin markdown) MINIFICADO.
-Genera SOLO estos tokens faltantes (no incluyas otros keys).
-Idioma: Español.
-Keyword: {$this->keyword}
-Tipo: {$this->tipo}
-
-NO repetir títulos:
-{$noRepetirTitles}
-
-NO repetir frases/subtemas:
-{$noRepetirCorpus}
-
-Blueprint (token, widgetType, original):
-{$bpShort}
-
-Formato:
-{"{{TOKEN_1}}":"...","{{TOKEN_2}}":"..."}
-PROMPT;
-
-        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 2000, temperature: 0.45, topP: 0.90, jsonMode: true);
-        $obj = $this->safeParseJsonObject($apiKey, $model, $raw);
-
-        $out = [];
-        foreach ($missingBp as $b) {
-            $tok = (string)($b['token'] ?? '');
-            if ($tok === '') continue;
-            $type = (string)($b['widgetType'] ?? 'unknown');
-            $val  = isset($obj[$tok]) ? (string)$obj[$tok] : '';
-            $out[$tok] = $this->normalizeByWidgetTypeAndToken($tok, $type, $val);
-        }
-
-        return $out;
-    }
-
-    private function promptUniversalTokenCopy(
-        string $keyword,
-        string $tipo,
-        array $blueprint,
-        string $noRepetirTitles,
-        string $noRepetirCorpus
-    ): string {
-        $bpShort = mb_substr(json_encode($blueprint, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 9500);
-
-        return <<<PROMPT
-Devuelve SOLO JSON válido (sin markdown, sin explicación). RESPUESTA MINIFICADA.
-
-Idioma: Español.
-Objetivo: Reemplazar TODOS los tokens del template por textos nuevos, claros, útiles y coherentes con el "original".
-
-Keyword: {$keyword}
-Tipo: {$tipo}
-
-NO repetir títulos:
-{$noRepetirTitles}
-
-NO repetir frases/subtemas:
-{$noRepetirCorpus}
-
-REGLAS:
-- Devuelve "seo_title" (60–65 chars) y "meta_description" (130–155 chars).
-- Para cada token del blueprint, devuelve una key EXACTA igual al token (ej "{{H_01}}") con su valor.
-- heading: frase corta; puede usar <strong>; NO uses <h1>/<h2>.
-- text-editor: HTML SOLO <p>, <strong>, <br>. 2–4 párrafos cortos, concretos (no humo).
-- button: 2–4 palabras, sin HTML.
-- icon-list: muy corto, sin HTML (2–6 palabras máximo).
-- Nada vacío, nada "<p></p>", nada incoherente.
-
-BLUEPRINT (token, widgetType, original):
-{$bpShort}
-
-Formato:
-{"seo_title":"...","meta_description":"...","{{H_01}}":"...","{{P_01}}":"<p>...</p>","{{BTN_01}}":"..."}
-PROMPT;
-    }
-
-    private function normalizeByWidgetTypeAndToken(string $tok, string $type, string $val): string
-    {
-        $val = (string)$val;
-
-        if ($type === '' || $type === 'unknown') {
-            if (str_starts_with($tok, '{{H_')) $type = 'heading';
-            elseif (str_starts_with($tok, '{{P_')) $type = 'text-editor';
-            elseif (str_starts_with($tok, '{{BTN_')) $type = 'button';
-        }
-
-        if ($type === 'text-editor') {
-            $val = $this->keepAllowedInlineHtml($val);
-            if ($this->isBlankHtml($val)) {
-                $kw = htmlspecialchars($this->keyword, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-                $val = "<p>Información clara y práctica sobre {$kw}.</p><p>Contenido listo para publicar, enfocado en resolver dudas reales.</p>";
-            }
-        } elseif ($type === 'button') {
-            $val = trim(strip_tags($val));
-            if ($val === '') $val = $this->pick(["Ver más","Saber más","Empezar","Contactar"]);
-            if (mb_strlen($val) > 24) $val = mb_substr($val, 0, 24);
-        } elseif ($type === 'icon-list') {
-            $val = trim(strip_tags($val));
-            if ($val === '') $val = $this->pick(["Rápido","Claro","Optimizado","Listo"]);
-            if (mb_strlen($val) > 55) $val = mb_substr($val, 0, 55);
-        } elseif ($type === 'heading') {
-            $val = $this->keepAllowedInlineStrong($val);
-            $val = trim($val);
-            if ($val === '') $val = "Guía sobre " . mb_substr($this->keyword, 0, 55);
-            if (mb_strlen(strip_tags($val)) > 75) $val = mb_substr(strip_tags($val), 0, 75);
-        } else {
-            $val = $this->keepAllowedInlineStrong($val);
-            if (trim(strip_tags($val)) === '') $val = "Contenido para " . mb_substr($this->keyword, 0, 55);
-        }
-
-        return $val;
-    }
-
-    private function findMissingTokensInCopy(array $tokensInTpl, array $copy): array
-    {
-        $missing = [];
-        foreach ($tokensInTpl as $tok) {
-            if (!array_key_exists($tok, $copy)) $missing[] = $tok;
-            else {
-                $v = (string)$copy[$tok];
-                if (trim(strip_tags($v)) === '') $missing[] = $tok;
-            }
-        }
-        return $missing;
-    }
-
-    // ===========================================================
-    // Replace + token collection (con normalización de espacios)
-    // ===========================================================
-    private function fillTemplateByTokensWithStats(array $tpl, array $copy): array
-    {
-        $dict = $this->buildTokenDictionary($copy);
-
-        $replacedCount = 0;
-        $this->replaceTokensDeep($tpl, $dict, $replacedCount);
-
-        $remaining = $this->collectRemainingTokensDeep($tpl);
-
-        return [$tpl, $replacedCount, $remaining];
-    }
-
-    private function buildTokenDictionary(array $copy): array
-    {
-        $dict = [];
-
-        foreach ($copy as $k => $v) {
-            if ($k === 'seo_title' || $k === 'meta_description') continue;
-            if (is_string($k) && str_starts_with($k, '{{') && str_ends_with($k, '}}')) {
-                $dict[$k] = (string)$v;
-            }
-        }
-
-        $dict['{{SEO_TITLE}}'] = (string)($copy['seo_title'] ?? $this->keyword);
-
-        return $dict;
-    }
-
-    private function replaceTokensDeep(mixed &$node, array $dict, int &$count): void
-    {
-        if (is_array($node)) {
-            foreach ($node as &$v) $this->replaceTokensDeep($v, $dict, $count);
-            return;
-        }
-
-        if (!is_string($node) || $node === '') return;
-        if (!str_contains($node, '{{')) return;
-
-        $orig = $node;
-
-        $node = $this->normalizeTokenSpacing($node);
-        $node = strtr($node, $dict);
-
-        if ($node !== $orig) $count++;
-    }
-
-    private function normalizeTokenSpacing(string $s): string
-    {
-        return (string) preg_replace('/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/', '{{$1}}', $s);
-    }
-
-    private function collectRemainingTokensDeep(mixed $node): array
-    {
-        $found = [];
-        $walk = function ($n) use (&$walk, &$found) {
-            if (is_array($n)) { foreach ($n as $v) $walk($v); return; }
-            if (!is_string($n) || $n === '') return;
-            if (!str_contains($n, '{{')) return;
-
-            $n = $this->normalizeTokenSpacing($n);
-
-            if (preg_match_all('/\{\{[A-Za-z0-9_]+\}\}/', $n, $m)) {
-                foreach ($m[0] as $tok) $found[] = $tok;
-            }
-        };
-        $walk($node);
-        $found = array_values(array_unique($found));
-        sort($found);
-        return $found;
-    }
-
-    // ===========================================================
-    // DeepSeek (timeout controlado)
+    // DeepSeek
     // ===========================================================
     private function deepseekText(
         string $apiKey,
@@ -596,16 +296,18 @@ PROMPT;
         float $topP = 0.92,
         bool $jsonMode = true
     ): string {
+        $nonce = 'nonce:' . Str::uuid()->toString();
+
         $payload = [
             'model' => $model,
             'messages' => [
                 ['role' => 'system', 'content' => 'Devuelves SOLO JSON válido. No markdown. No explicaciones.'],
-                ['role' => 'user', 'content' => $prompt],
+                ['role' => 'user', 'content' => $prompt . "\n\n" . $nonce],
             ],
             'temperature' => $temperature,
             'top_p' => $topP,
-            'presence_penalty' => 1.0,
-            'frequency_penalty' => 0.5,
+            'presence_penalty' => 1.1,
+            'frequency_penalty' => 0.6,
             'max_tokens' => $maxTokens,
         ];
 
@@ -617,7 +319,7 @@ PROMPT;
                 'Content-Type' => 'application/json',
             ])
             ->connectTimeout(15)
-            ->timeout(140) // ⬅️ controlado, no se queda “eterno”
+            ->timeout(180)
             ->retry(0, 0)
             ->post('https://api.deepseek.com/v1/chat/completions', $payload);
 
@@ -627,21 +329,105 @@ PROMPT;
 
         $data = $resp->json();
         $text = trim((string)($data['choices'][0]['message']['content'] ?? ''));
-        if ($text === '') throw new \RuntimeException("NO_RETRY: DeepSeek returned empty text.");
+        if ($text === '') throw new \RuntimeException("DeepSeek returned empty text.");
 
         return $text;
     }
 
-    private function safeParseJsonObject(string $apiKey, string $model, string $raw): array
+    // ===========================================================
+    // PARSE ROBUSTO + SKELETON
+    // ===========================================================
+    private function safeParseOrRepair(string $apiKey, string $model, string $raw, array $brief): array
     {
         try {
-            return $this->parseJsonStrict($raw);
+            $a = $this->parseJsonStrict($raw);
+            return $this->mergeWithSkeleton($a);
         } catch (\Throwable $e) {
-            // 1 repair
-            $repair = "Devuelve SOLO JSON válido minificado. Repara este output:\n{$raw}";
-            $fixed = $this->deepseekText($apiKey, $model, $repair, maxTokens: 1800, temperature: 0.10, topP: 0.90, jsonMode: true);
-            return $this->parseJsonStrict($fixed);
+            $loose = $this->parseJsonLoose($raw);
+            $merged = $this->mergeWithSkeleton($loose);
+
+            if (trim($this->toStr($merged['hero_h1'] ?? '')) !== '' || trim($this->toStr($merged['pack_h2'] ?? '')) !== '') {
+                return $merged;
+            }
+
+            $fixed = $this->repairJsonViaDeepseek($apiKey, $model, $raw, $brief);
+            try {
+                $b = $this->parseJsonStrict($fixed);
+                return $this->mergeWithSkeleton($b);
+            } catch (\Throwable $e2) {
+                $loose2 = $this->parseJsonLoose($fixed);
+                return $this->mergeWithSkeleton($loose2);
+            }
         }
+    }
+
+    private function mergeWithSkeleton(array $partial): array
+    {
+        $skeleton = [
+            'seo_title' => '',
+            'hero_kicker' => '',
+            'hero_h1' => '',
+            'hero_p_html' => '<p></p>',
+            'kit_h1' => '',
+            'kit_p_html' => '<p></p>',
+            'pack_h2' => '',
+            'pack_p_html' => '<p></p>',
+            'price_h2' => '',
+            'features' => [],
+            'clients_label' => '',
+            'clients_subtitle' => '',
+            'clients_p_html' => '<p></p>',
+            'reviews_label' => '',
+            'testimonios_title' => '',
+            'projects_title' => '',
+            'faq_title' => '',
+            'faq' => [],
+            'final_cta_h3' => '',
+            'btn_presupuesto' => '',
+            'btn_reunion' => '',
+            'kitdigital_bold' => '',
+            'kitdigital_p_html' => '<p></p>',
+            'btn_kitdigital' => '',
+        ];
+
+        $out = $skeleton;
+        foreach ($partial as $k => $v) $out[$k] = $v;
+        return $out;
+    }
+
+    private function repairJsonViaDeepseek(string $apiKey, string $model, string $broken, array $brief): string
+    {
+        $angle = $this->toStr($brief['angle'] ?? '');
+        $tone  = $this->toStr($brief['tone'] ?? '');
+        $broken = mb_substr(trim((string)$broken), 0, 9000);
+
+        $prompt = <<<PROMPT
+Devuelve SOLO JSON válido. Sin markdown. RESPUESTA MINIFICADA.
+Completa este JSON y devuélvelo VÁLIDO con estas keys obligatorias:
+seo_title, hero_kicker, hero_h1, hero_p_html,
+kit_h1, kit_p_html, pack_h2, pack_p_html, price_h2,
+features (4), clients_label, clients_subtitle, clients_p_html,
+reviews_label, testimonios_title, projects_title,
+faq_title, faq (9),
+final_cta_h3, btn_presupuesto, btn_reunion,
+kitdigital_bold, kitdigital_p_html, btn_kitdigital
+
+Reglas:
+- HTML permitido SOLO: <p>, <strong>, <br>
+- SOLO 1 H1: hero_h1 (no uses <h1>)
+- 4 features exactas y 9 FAQs exactas
+- clients_subtitle MUY CORTO (6–12 palabras)
+- NO vacíos ni "<p></p>"
+
+Estilo:
+- Ángulo: {$angle}
+- Tono: {$tone}
+
+JSON roto:
+{$broken}
+PROMPT;
+
+        return $this->deepseekText($apiKey, $model, $prompt, maxTokens: 3400, temperature: 0.18, topP: 0.90, jsonMode: true);
     }
 
     private function parseJsonStrict(string $raw): array
@@ -660,9 +446,756 @@ PROMPT;
         $data = json_decode($raw, true);
         if (!is_array($data)) {
             $snip = mb_substr($raw, 0, 700);
-            throw new \RuntimeException('NO_RETRY: DeepSeek no devolvió JSON válido. Snippet: ' . $snip);
+            throw new \RuntimeException('DeepSeek no devolvió JSON válido. Snippet: ' . $snip);
         }
+
         return $data;
+    }
+
+    private function parseJsonLoose(string $raw): array
+    {
+        $raw = trim((string)$raw);
+        $raw = preg_replace('~^```(?:json)?\s*~i', '', $raw);
+        $raw = preg_replace('~\s*```$~', '', $raw);
+        $raw = trim($raw);
+
+        $pos = strpos($raw, '{');
+        if ($pos !== false) $raw = substr($raw, $pos);
+
+        $out = [];
+        foreach ([
+            'seo_title','hero_kicker','hero_h1','hero_p_html',
+            'kit_h1','kit_p_html',
+            'pack_h2','pack_p_html','price_h2',
+            'clients_label','clients_subtitle','clients_p_html',
+            'reviews_label','testimonios_title','projects_title',
+            'faq_title','final_cta_h3',
+            'btn_presupuesto','btn_reunion',
+            'kitdigital_bold','kitdigital_p_html','btn_kitdigital'
+        ] as $key) {
+            $v = $this->extractJsonValueLoose($raw, $key);
+            if ($v !== null) $out[$key] = $v;
+        }
+
+        $featuresBlock = $this->extractBetween($raw, '"features"', '"clients_label"');
+        if ($featuresBlock !== null) {
+            $objs = $this->extractObjects($featuresBlock);
+            $features = [];
+            foreach ($objs as $obj) {
+                $t = $this->extractJsonValueLoose($obj, 'title') ?? '';
+                $p = $this->extractJsonValueLoose($obj, 'p_html') ?? '';
+                if (trim($this->toStr($t)) === '' && trim($this->toStr($p)) === '') continue;
+                $features[] = ['title' => $t, 'p_html' => $p];
+            }
+            if (!empty($features)) $out['features'] = $features;
+        }
+
+        $faqBlock = $this->extractBetween($raw, '"faq"', '"final_cta_h3"');
+        if ($faqBlock !== null) {
+            $objs = $this->extractObjects($faqBlock);
+            $faq = [];
+            foreach ($objs as $obj) {
+                $q = $this->extractJsonValueLoose($obj, 'q') ?? '';
+                $a = $this->extractJsonValueLoose($obj, 'a_html') ?? '';
+                if (trim($this->toStr($q)) === '' && trim($this->toStr($a)) === '') continue;
+                $faq[] = ['q' => $q, 'a_html' => $a];
+            }
+            if (!empty($faq)) $out['faq'] = $faq;
+        }
+
+        return $out;
+    }
+
+    private function extractBetween(string $raw, string $fromToken, string $toToken): ?string
+    {
+        $p1 = strpos($raw, $fromToken);
+        if ($p1 === false) return null;
+        $p2 = strpos($raw, $toToken, $p1 + strlen($fromToken));
+        if ($p2 === false) return mb_substr($raw, $p1, 6500);
+        return substr($raw, $p1, $p2 - $p1);
+    }
+
+    private function extractObjects(string $block): array
+    {
+        $m = [];
+        preg_match_all('~\{[^{}]*\}~s', $block, $m);
+        return $m[0] ?? [];
+    }
+
+    private function extractJsonValueLoose(string $raw, string $key): mixed
+    {
+        $patternStr = '~"' . preg_quote($key, '~') . '"\s*:\s*"((?:\\\\.|[^"\\\\])*)~u';
+        if (preg_match($patternStr, $raw, $m)) {
+            $inner = (string)($m[1] ?? '');
+            $decoded = json_decode('"' . $inner . '"', true);
+            return is_string($decoded) ? $decoded : stripcslashes($inner);
+        }
+
+        $patternAny = '~"' . preg_quote($key, '~') . '"\s*:\s*(\[[^\]]*\]|\{[^}]*\})~us';
+        if (preg_match($patternAny, $raw, $m2)) {
+            $chunk = trim((string)($m2[1] ?? ''));
+            $decoded = json_decode($chunk, true);
+            return $decoded ?? $chunk;
+        }
+
+        return null;
+    }
+
+    // ===========================================================
+    // VALIDATE / FALLBACKS (tu idea, pero sin loops)
+    // ===========================================================
+    private function validateOrRepairCopy(
+        string $apiKey,
+        string $model,
+        array $copy,
+        array $brief,
+        string $stage,
+        string $noRepetirTitles,
+        string $noRepetirCorpus
+    ): array {
+        $this->briefContext = $brief;
+
+        $copy = $this->sanitizeAndNormalizeCopy($copy);
+        $this->applyDynamicFallbacks($copy, force: false);
+
+        try {
+            return $this->validateAndFixCopy($copy);
+        } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+
+            // Si es vacío -> fallback fuerte y seguimos
+            if (str_contains($msg, 'Campo vacío generado:') || str_contains($msg, 'HTML vacío generado:')) {
+                $this->applyDynamicFallbacks($copy, force: true);
+                return $this->validateAndFixCopy($copy);
+            }
+
+            // Repair IA 1 vez, si falla => fallback hard
+            $repairRaw = $this->repairMissingFieldsViaDeepseek(
+                $apiKey, $model, $copy, $brief, $stage, $msg, $noRepetirTitles, $noRepetirCorpus
+            );
+            $repaired = $this->safeParseOrRepair($apiKey, $model, $repairRaw, $brief);
+            $repaired = $this->sanitizeAndNormalizeCopy($repaired);
+            $this->applyDynamicFallbacks($repaired, force: true);
+
+            try {
+                return $this->validateAndFixCopy($repaired);
+            } catch (\Throwable $e2) {
+                $this->applyDynamicFallbacks($repaired, force: true, hard: true);
+                return $this->validateAndFixCopy($repaired);
+            }
+        }
+    }
+
+    private function repairMissingFieldsViaDeepseek(
+        string $apiKey,
+        string $model,
+        array $current,
+        array $brief,
+        string $stage,
+        string $error,
+        string $noRepetirTitles,
+        string $noRepetirCorpus
+    ): string {
+        $angle = $this->toStr($brief['angle'] ?? '');
+        $tone  = $this->toStr($brief['tone'] ?? '');
+        $cta   = $this->toStr($brief['cta'] ?? '');
+        $aud   = $this->toStr($brief['audience'] ?? '');
+
+        $json = json_encode($current, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $json = mb_substr((string)$json, 0, 9000);
+
+        $prompt = <<<PROMPT
+Devuelve SOLO JSON válido. RESPUESTA MINIFICADA.
+Contexto:
+- Keyword: {$this->keyword}
+- Tipo: {$this->tipo}
+- Etapa: {$stage}
+- Error: {$error}
+
+BRIEF:
+- Ángulo: {$angle}
+- Tono: {$tone}
+- Público: {$aud}
+- CTA: {$cta}
+
+Reglas:
+- NO dejar campos vacíos.
+- clients_subtitle MUY CORTO (6–12 palabras).
+- clients_p_html NO debe copiar pack_p_html.
+- 4 features exactas y 9 FAQs exactas.
+- HTML SOLO: <p>, <strong>, <br>.
+
+NO repetir títulos:
+{$noRepetirTitles}
+
+NO repetir textos:
+{$noRepetirCorpus}
+
+JSON actual:
+{$json}
+PROMPT;
+
+        return $this->deepseekText($apiKey, $model, $prompt, maxTokens: 3400, temperature: 0.20, topP: 0.90, jsonMode: true);
+    }
+
+    private function sanitizeAndNormalizeCopy(array $copy): array
+    {
+        $copy['features'] = isset($copy['features']) && is_array($copy['features']) ? $copy['features'] : [];
+        $copy['faq']      = isset($copy['faq']) && is_array($copy['faq']) ? $copy['faq'] : [];
+
+        foreach (['hero_p_html','kit_p_html','pack_p_html','clients_p_html','kitdigital_p_html'] as $k) {
+            if (isset($copy[$k])) {
+                $copy[$k] = $this->keepAllowedInlineHtml($this->stripH1Tags($this->toStr($copy[$k])));
+            }
+        }
+
+        if (isset($copy['seo_title'])) {
+            $seo = trim(strip_tags($this->toStr($copy['seo_title'])));
+            if (mb_strlen($seo) > 65) $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
+            $copy['seo_title'] = $seo;
+        }
+
+        if (count($copy['features']) > 4) $copy['features'] = array_slice($copy['features'], 0, 4);
+        if (count($copy['faq']) > 9) $copy['faq'] = array_slice($copy['faq'], 0, 9);
+
+        return $copy;
+    }
+
+    private function validateAndFixCopy(array $copy): array
+    {
+        $copy = $this->sanitizeAndNormalizeCopy($copy);
+
+        // fallback fuerte antes de validar
+        $this->applyDynamicFallbacks($copy, force: true);
+
+        foreach ([
+            'seo_title','hero_kicker','hero_h1',
+            'kit_h1','pack_h2','price_h2',
+            'clients_label','clients_subtitle',
+            'reviews_label','testimonios_title','projects_title',
+            'faq_title','final_cta_h3',
+            'btn_presupuesto','btn_reunion',
+            'kitdigital_bold','btn_kitdigital',
+        ] as $k) {
+            $this->requireText($copy[$k] ?? '', $k);
+        }
+
+        foreach (['hero_p_html','kit_p_html','pack_p_html','clients_p_html','kitdigital_p_html'] as $k) {
+            $this->requireHtml($copy[$k] ?? '', $k);
+        }
+
+        if (!is_array($copy['features']) || count($copy['features']) !== 4) {
+            throw new \RuntimeException('Debe haber EXACTAMENTE 4 features generadas.');
+        }
+        if (!is_array($copy['faq']) || count($copy['faq']) !== 9) {
+            throw new \RuntimeException('Debe haber EXACTAMENTE 9 FAQs generadas.');
+        }
+
+        foreach ($copy['features'] as $i => $f) {
+            if (!is_array($f)) throw new \RuntimeException("Feature inválida index {$i}");
+            $this->requireText($f['title'] ?? '', "features[$i].title");
+            $this->requireHtml($f['p_html'] ?? '', "features[$i].p_html");
+        }
+
+        foreach ($copy['faq'] as $i => $q) {
+            if (!is_array($q)) throw new \RuntimeException("FAQ inválida index {$i}");
+            $this->requireText($q['q'] ?? '', "faq[$i].q");
+            $this->requireHtml($q['a_html'] ?? '', "faq[$i].a_html");
+        }
+
+        // clients_subtitle corto
+        $s = trim(strip_tags($this->toStr($copy['clients_subtitle'] ?? '')));
+        $words = preg_split('~\s+~u', $s, -1, PREG_SPLIT_NO_EMPTY);
+        if ($words && count($words) > 12) $copy['clients_subtitle'] = implode(' ', array_slice($words, 0, 12));
+
+        if ($this->violatesSeoHardRules($copy)) {
+            throw new \RuntimeException("El JSON viola reglas SEO/H1");
+        }
+
+        return $copy;
+    }
+
+    private function applyDynamicFallbacks(array &$copy, bool $force = false, bool $hard = false): void
+    {
+        $kw = $this->shortKw();
+
+        $needText = function(string $k) use (&$copy, $force): bool {
+            if ($force) return true;
+            return trim(strip_tags($this->toStr($copy[$k] ?? ''))) === '';
+        };
+
+        $needHtml = function(string $k) use (&$copy, $force): bool {
+            if ($force) return true;
+            $h = $this->keepAllowedInlineHtml($this->stripH1Tags($this->toStr($copy[$k] ?? '')));
+            return ($h === '' || $this->isBlankHtml($h) || preg_match('~<p>\s*</p>~i', $h));
+        };
+
+        if ($needText('hero_kicker')) $copy['hero_kicker'] = $this->pick(["Web que convierte","Sitio optimizado","Mensaje claro","Estructura sólida"]);
+        if ($needText('hero_h1'))     $copy['hero_h1'] = "{$kw} con estructura y copy que convierten";
+        if ($needHtml('hero_p_html')) $copy['hero_p_html'] = "<p>Contenido preparado para {$kw}: claro, escaneable y pensado para guiar a la acción sin relleno.</p>";
+
+        if ($needText('kit_h1'))      $copy['kit_h1'] = "Bloques listos para {$kw}";
+        if ($needHtml('kit_p_html'))  $copy['kit_p_html'] = "<p>Secciones coherentes y textos listos para adaptar y publicar, sin huecos ni promesas irreales.</p>";
+
+        if ($needText('pack_h2'))     $copy['pack_h2'] = "Estructura y copy para {$kw}";
+        if ($needHtml('pack_p_html')) $copy['pack_p_html'] = "<p>Mensajes alineados a intención, con beneficios claros y CTA consistente para avanzar.</p>";
+
+        if ($needText('price_h2'))    $copy['price_h2'] = $this->pick(["Plan claro y entregables definidos","Entrega lista para publicar","Implementación rápida y ordenada"]);
+
+        if ($needText('clients_label'))    $copy['clients_label'] = $this->pick(["Marcas","Equipos","Negocios","Proyectos"]);
+        if ($needText('clients_subtitle')) $copy['clients_subtitle'] = $this->pick(["Claridad, orden y enfoque","Mensaje directo y estructura","Secciones con propósito"]);
+        if ($needHtml('clients_p_html'))   $copy['clients_p_html'] = "<p>Ideal para equipos que necesitan una web coherente: propuesta clara, secciones con intención y textos listos para publicar sin improvisar.</p>";
+
+        if ($needText('reviews_label'))     $copy['reviews_label'] = $this->pick(["Reseñas","Opiniones","Resultados","Valoraciones"]);
+        if ($needText('testimonios_title')) $copy['testimonios_title'] = $this->pick(["Lo que suelen valorar","Qué suele funcionar","Puntos fuertes del enfoque"]);
+        if ($needText('projects_title'))    $copy['projects_title'] = $this->pick(["Ejemplos de estructura","Ideas de implementación","Bloques listos para adaptar"]);
+
+        if ($needText('faq_title')) $copy['faq_title'] = "Preguntas frecuentes";
+
+        if ($needText('final_cta_h3'))     $copy['final_cta_h3'] = "¿Quieres publicarlo y avanzar?";
+        if ($needText('btn_presupuesto'))  $copy['btn_presupuesto'] = $this->pick(["Pedir propuesta","Solicitar presupuesto","Ver opciones"]);
+        if ($needText('btn_reunion'))      $copy['btn_reunion'] = $this->pick(["Agendar llamada","Reservar llamada","Hablar ahora"]);
+
+        if ($needText('kitdigital_bold'))  $copy['kitdigital_bold'] = $this->pick(["Información de ayudas","Opciones disponibles","Kit Digital"]);
+        if ($needHtml('kitdigital_p_html'))$copy['kitdigital_p_html'] = "<p>Si aplica, te guiamos en el proceso y dejamos la entrega lista para publicar con pasos claros y entregables definidos.</p>";
+        if ($needText('btn_kitdigital'))   $copy['btn_kitdigital'] = $this->pick(["Ver información","Consultar","Empezar"]);
+
+        if (!isset($copy['features']) || !is_array($copy['features'])) $copy['features'] = [];
+        if (!isset($copy['faq']) || !is_array($copy['faq'])) $copy['faq'] = [];
+
+        if ($hard || count($copy['features']) !== 4) {
+            $copy['features'] = [
+                ['title' => "Mensaje claro", 'p_html' => "<p>Texto directo, sin ruido, fácil de escanear y adaptar.</p>"],
+                ['title' => "Estructura con intención", 'p_html' => "<p>Secciones ordenadas para guiar lectura y decisión.</p>"],
+                ['title' => "SEO natural", 'p_html' => "<p>Semántica integrada sin repetir palabras de forma artificial.</p>"],
+                ['title' => "Listo para publicar", 'p_html' => "<p>Bloques y textos listos para WordPress/Elementor.</p>"],
+            ];
+        }
+
+        if ($hard || count($copy['faq']) !== 9) {
+            $copy['faq'] = [];
+            $qTpl = [
+                "¿Qué incluye este contenido?",
+                "¿Cuánto tarda en estar listo?",
+                "¿Qué necesito aportar para empezar?",
+                "¿Se adapta a mi sector o ciudad?",
+                "¿Cómo evitamos contenido duplicado?",
+                "¿Puedo publicarlo yo mismo?",
+                "¿Qué diferencia esto de algo genérico?",
+                "¿Hay ajustes después de la entrega?",
+                "¿Qué no incluye para evitar expectativas falsas?",
+            ];
+            $aTpl = [
+                "<p>Incluye estructura, textos y bloques listos para publicar y ajustar.</p>",
+                "<p>Depende del alcance, pero se avanza rápido con un brief claro.</p>",
+                "<p>Oferta, público y 2–3 referencias. Si falta claridad, se define contigo.</p>",
+                "<p>Sí, se ajusta el enfoque y el lenguaje sin forzar términos.</p>",
+                "<p>Se varía estructura y redacción y se compara contra historial reciente.</p>",
+                "<p>Sí. Queda en formato simple para Elementor/WordPress.</p>",
+                "<p>Está pensado para intención y claridad, no para rellenar secciones.</p>",
+                "<p>Se contempla una ronda razonable de ajustes para coherencia.</p>",
+                "<p>No promete resultados irreales: se define alcance y entregables.</p>",
+            ];
+            for ($i=0; $i<9; $i++) $copy['faq'][] = ['q' => $qTpl[$i], 'a_html' => $aTpl[$i]];
+        }
+
+        $seo = trim(strip_tags($this->toStr($copy['seo_title'] ?? '')));
+        if ($seo === '') $seo = "Contenido para {$kw} listo para publicar y adaptar";
+        if (mb_strlen($seo) > 65) $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
+        $copy['seo_title'] = $seo;
+    }
+
+    // ===========================================================
+    // TOKENS (tu plantilla "pretty tokens")
+    // ===========================================================
+    private function fillElementorTemplate_byPrettyTokens_withStats(array $tpl, array $copy): array
+    {
+        $copy = $this->validateAndFixCopy($copy);
+        $dict = $this->buildPrettyTokenDictionary($copy);
+
+        $replacedCount = 0;
+        $this->replaceTokensDeep($tpl, $dict, $replacedCount);
+
+        $remaining = $this->collectRemainingTokensDeep($tpl);
+
+        return [$tpl, $replacedCount, $remaining];
+    }
+
+    private function buildPrettyTokenDictionary(array $copy): array
+    {
+        $featuresListHtml = $this->buildFeaturesListHtml($copy);
+
+        $dict = [
+            '{{HERO_KICKER}}' => trim(strip_tags($this->toStr($copy['hero_kicker']))),
+            '{{HERO_H1}}'     => trim(strip_tags($this->toStr($copy['hero_h1']))),
+            '{{HERO_P}}'      => $this->keepAllowedInlineHtml($this->toStr($copy['hero_p_html'])),
+
+            '{{PACK_H2}}'     => trim(strip_tags($this->toStr($copy['pack_h2']))),
+            '{{PACK_P}}'      => $this->keepAllowedInlineHtml($this->toStr($copy['pack_p_html'])),
+            '{{PRICE_H2}}'    => trim(strip_tags($this->toStr($copy['price_h2']))),
+
+            '{{KIT_H1}}'      => trim(strip_tags($this->toStr($copy['kit_h1']))),
+            '{{KIT_P}}'       => $this->keepAllowedInlineHtml($this->toStr($copy['kit_p_html'])),
+
+            '{{FEATURE_1_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][0]['title']))),
+            '{{FEATURE_1_P}}'     => $this->keepAllowedInlineHtml($this->toStr($copy['features'][0]['p_html'])),
+            '{{FEATURE_2_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][1]['title']))),
+            '{{FEATURE_2_P}}'     => $this->keepAllowedInlineHtml($this->toStr($copy['features'][1]['p_html'])),
+            '{{FEATURE_3_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][2]['title']))),
+            '{{FEATURE_3_P}}'     => $this->keepAllowedInlineHtml($this->toStr($copy['features'][2]['p_html'])),
+            '{{FEATURE_4_TITLE}}' => trim(strip_tags($this->toStr($copy['features'][3]['title']))),
+            '{{FEATURE_4_P}}'     => $this->keepAllowedInlineHtml($this->toStr($copy['features'][3]['p_html'])),
+
+            '{{FEATURES_LIST_HTML}}' => $featuresListHtml,
+
+            '{{CLIENTS_LABEL}}'    => trim(strip_tags($this->toStr($copy['clients_label']))),
+            '{{CLIENTS_SUBTITLE}}' => trim(strip_tags($this->toStr($copy['clients_subtitle']))),
+            '{{CLIENTS_P}}'        => $this->keepAllowedInlineHtml($this->toStr($copy['clients_p_html'])),
+
+            '{{REVIEWS_LABEL}}'     => trim(strip_tags($this->toStr($copy['reviews_label']))),
+            '{{TESTIMONIOS_TITLE}}' => trim(strip_tags($this->toStr($copy['testimonios_title']))),
+            '{{PROJECTS_TITLE}}'    => trim(strip_tags($this->toStr($copy['projects_title']))),
+
+            '{{FAQ_TITLE}}'         => trim(strip_tags($this->toStr($copy['faq_title']))),
+
+            '{{FINAL_CTA}}'         => trim(strip_tags($this->toStr($copy['final_cta_h3']))),
+
+            '{{BTN_PRESUPUESTO}}'   => trim(strip_tags($this->toStr($copy['btn_presupuesto']))),
+            '{{BTN_REUNION}}'       => trim(strip_tags($this->toStr($copy['btn_reunion']))),
+
+            '{{KITDIGITAL_BOLD}}'   => trim(strip_tags($this->toStr($copy['kitdigital_bold']))),
+            '{{KITDIGITAL_P}}'      => $this->keepAllowedInlineHtml($this->toStr($copy['kitdigital_p_html'])),
+            '{{BTN_KITDIGITAL}}'    => trim(strip_tags($this->toStr($copy['btn_kitdigital']))),
+        ];
+
+        for ($i = 0; $i < 9; $i++) {
+            $dict['{{FAQ_' . ($i + 1) . '_Q}}'] = trim(strip_tags($this->toStr($copy['faq'][$i]['q'])));
+            $dict['{{FAQ_' . ($i + 1) . '_A}}'] = $this->keepAllowedInlineHtml($this->toStr($copy['faq'][$i]['a_html']));
+        }
+
+        // Tokens universales opcionales
+        foreach ($this->buildUniversalTokenValues($copy) as $tok => $val) {
+            $dict[$tok] = $val;
+        }
+
+        return $dict;
+    }
+
+    private function buildUniversalTokenValues(array $copy): array
+    {
+        $out = [];
+        for ($i=1; $i<=12; $i++) {
+            $out["{{SECTION_{$i}_TITLE}}"] = "Sección {$i}";
+            $out["{{SECTION_{$i}_P}}"] = "<p>Texto breve y adaptable para esta sección.</p>";
+            $out["{{BULLET_{$i}}}"] = "Punto {$i}";
+        }
+        for ($i=1; $i<=6; $i++) $out["{{BADGE_{$i}}}"] = "Etiqueta {$i}";
+
+        $out["{{CTA_1_TITLE}}"] = trim(strip_tags($this->toStr($copy['final_cta_h3'] ?? '')));
+        $out["{{CTA_1_P}}"]     = $this->keepAllowedInlineHtml($this->toStr($copy['hero_p_html'] ?? '<p></p>'));
+        $out["{{CTA_1_BTN}}"]   = trim(strip_tags($this->toStr($copy['btn_presupuesto'] ?? '')));
+
+        $out["{{CTA_2_TITLE}}"] = trim(strip_tags($this->toStr($copy['pack_h2'] ?? '')));
+        $out["{{CTA_2_P}}"]     = $this->keepAllowedInlineHtml($this->toStr($copy['pack_p_html'] ?? '<p></p>'));
+        $out["{{CTA_2_BTN}}"]   = trim(strip_tags($this->toStr($copy['btn_reunion'] ?? '')));
+
+        $out["{{CTA_3_TITLE}}"] = trim(strip_tags($this->toStr($copy['kitdigital_bold'] ?? '')));
+        $out["{{CTA_3_P}}"]     = $this->keepAllowedInlineHtml($this->toStr($copy['kitdigital_p_html'] ?? '<p></p>'));
+        $out["{{CTA_3_BTN}}"]   = trim(strip_tags($this->toStr($copy['btn_kitdigital'] ?? '')));
+
+        return $out;
+    }
+
+    private function buildFeaturesListHtml(array $copy): string
+    {
+        $parts = [];
+        for ($i = 0; $i < 4; $i++) {
+            $t = trim(strip_tags($this->toStr($copy['features'][$i]['title'] ?? '')));
+            $pTxt = trim(strip_tags($this->toStr($copy['features'][$i]['p_html'] ?? '')));
+            if ($t === '') $t = "Bloque " . ($i+1);
+            if ($pTxt === '') $pTxt = "Texto breve y reutilizable.";
+            $parts[] = "<p><strong>" . htmlspecialchars($t, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ":</strong> " . htmlspecialchars($pTxt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</p>";
+        }
+        return implode('', $parts);
+    }
+
+    private function replaceTokensDeep(mixed &$node, array $dict, int &$count): void
+    {
+        if (is_array($node)) {
+            foreach ($node as &$v) $this->replaceTokensDeep($v, $dict, $count);
+            return;
+        }
+        if (!is_string($node) || $node === '') return;
+        if (!str_contains($node, '{{')) return;
+
+        $orig = $node;
+        $node = strtr($node, $dict);
+        if ($node !== $orig) $count++;
+    }
+
+    private function collectRemainingTokensDeep(mixed $node): array
+    {
+        $found = [];
+        $walk = function ($n) use (&$walk, &$found) {
+            if (is_array($n)) { foreach ($n as $v) $walk($v); return; }
+            if (!is_string($n) || $n === '') return;
+            if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $n, $m)) foreach ($m[0] as $tok) $found[] = $tok;
+        };
+        $walk($node);
+        $found = array_values(array_unique($found));
+        sort($found);
+        return $found;
+    }
+
+    // Post-pass opcional (tu idea)
+    private function forceReplaceStaticTextsInTemplate(array $tpl, array $copy): array
+    {
+        $mapExact = [];
+
+        $bp = trim(strip_tags($this->toStr($copy['btn_presupuesto'] ?? '')));
+        $br = trim(strip_tags($this->toStr($copy['btn_reunion'] ?? '')));
+        $bk = trim(strip_tags($this->toStr($copy['btn_kitdigital'] ?? '')));
+        $fc = trim(strip_tags($this->toStr($copy['final_cta_h3'] ?? '')));
+
+        if ($bp !== '') {
+            $mapExact["Solicitar presupuesto"] = $bp;
+            $mapExact["Pedir presupuesto"] = $bp;
+            $mapExact["Solicitar propuesta"] = $bp;
+        }
+        if ($br !== '') {
+            $mapExact["Reservar llamada"] = $br;
+            $mapExact["Agendar llamada"] = $br;
+            $mapExact["Agendar reunión"] = $br;
+        }
+        if ($bk !== '') {
+            $mapExact["Acceder al Kit Digital"] = $bk;
+            $mapExact["Ver Kit Digital"] = $bk;
+            $mapExact["Solicitar Kit Digital"] = $bk;
+        }
+        if ($fc !== '') {
+            $mapExact["¿Listo para avanzar?"] = $fc;
+        }
+
+        $count = 0;
+        if (!empty($mapExact)) $this->replaceStringsRecursive($tpl, $mapExact, $count);
+
+        return [$tpl, $count];
+    }
+
+    private function replaceStringsRecursive(mixed &$node, array $mapExact, int &$count): void
+    {
+        if (is_array($node)) {
+            foreach ($node as &$v) $this->replaceStringsRecursive($v, $mapExact, $count);
+            return;
+        }
+        if (!is_string($node) || $node === '') return;
+
+        $orig = $node;
+        $trim = trim($node);
+
+        if (isset($mapExact[$trim])) {
+            $node = $mapExact[$trim];
+        } else {
+            foreach ($mapExact as $from => $to) {
+                if ($from !== '' && str_contains($node, $from)) {
+                    $node = str_replace($from, $to, $node);
+                }
+            }
+        }
+
+        if ($node !== $orig) $count++;
+    }
+
+    // ===========================================================
+    // PROMPTS (tus prompts, limpios)
+    // ===========================================================
+    private function creativeBrief(string $keyword): array
+    {
+        $angles = [
+            "Rapidez y ejecución (plazos claros, entrega sin vueltas)",
+            "Orientado a leads (CTA, objeciones, conversión)",
+            "Personalización (sector/ciudad/propuesta)",
+            "Optimización SEO natural (semántica, intención, sin stuffing)",
+            "Claridad del mensaje (menos ruido, más foco)",
+        ];
+        $tones = ["Profesional directo","Cercano y humano","Sobrio","Enérgico","Técnico simple"];
+        $ctas  = ["Reserva/Agenda","Consulta","Presupuesto","Diagnóstico"];
+        $audiences = ["Pymes","Negocio local","Servicios","Marcas en crecimiento","Profesionales"];
+
+        return [
+            'angle' => $angles[random_int(0, count($angles) - 1)],
+            'tone' => $tones[random_int(0, count($tones) - 1)],
+            'cta' => $ctas[random_int(0, count($ctas) - 1)],
+            'audience' => $audiences[random_int(0, count($audiences) - 1)],
+        ];
+    }
+
+    private function promptRedactorJson(string $tipo, string $keyword, string $noRepetirTitles, string $noRepetirCorpus, array $brief): string
+    {
+        $angle = $this->toStr($brief['angle'] ?? '');
+        $tone  = $this->toStr($brief['tone'] ?? '');
+        $cta   = $this->toStr($brief['cta'] ?? '');
+        $aud   = $this->toStr($brief['audience'] ?? '');
+
+        return <<<PROMPT
+Devuelve SOLO JSON válido (sin markdown). RESPUESTA MINIFICADA.
+Keyword: {$keyword}
+Tipo: {$tipo}
+
+BRIEF:
+- Ángulo: {$angle}
+- Tono: {$tone}
+- Público: {$aud}
+- CTA: {$cta}
+
+NO REPETIR TÍTULOS:
+{$noRepetirTitles}
+
+NO REPETIR FRASES / SUBTEMAS:
+{$noRepetirCorpus}
+
+REGLAS DURAS:
+- NO vacíos. Prohibido "", null o "<p></p>".
+- SOLO 1 H1: hero_h1 (no uses <h1>).
+- Sin claims falsos.
+- Evita keyword stuffing.
+- HTML permitido SOLO: <p>, <strong>, <br>
+- EXACTAMENTE 4 features y EXACTAMENTE 9 FAQs.
+- clients_subtitle MUY CORTO (6–12 palabras)
+- seo_title 60-65 chars aprox
+
+ESQUEMA EXACTO:
+{"seo_title":"...","hero_kicker":"...","hero_h1":"...","hero_p_html":"<p>...</p>","kit_h1":"...","kit_p_html":"<p>...</p>","pack_h2":"...","pack_p_html":"<p>...</p>","price_h2":"...","features":[{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"},{"title":"...","p_html":"<p>...</p>"}],"clients_label":"...","clients_subtitle":"...","clients_p_html":"<p>...</p>","reviews_label":"...","testimonios_title":"...","projects_title":"...","faq_title":"...","faq":[{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"},{"q":"...","a_html":"<p>...</p>"}],"final_cta_h3":"...","btn_presupuesto":"...","btn_reunion":"...","kitdigital_bold":"...","kitdigital_p_html":"<p>...</p>","btn_kitdigital":"..."}
+PROMPT;
+    }
+
+    private function promptAuditorJson(string $tipo, string $keyword, array $draft, string $noRepetirTitles, string $noRepetirCorpus, array $brief): string
+    {
+        $draftShort = mb_substr(json_encode($draft, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 8500);
+        $angle = $this->toStr($brief['angle'] ?? '');
+        $tone  = $this->toStr($brief['tone'] ?? '');
+        $cta   = $this->toStr($brief['cta'] ?? '');
+
+        return <<<PROMPT
+Eres editor SEO/CRO. Reescribe TODO para que sea MUY diferente y sin repetir.
+Devuelve SOLO JSON válido (mismo esquema/keys). RESPUESTA MINIFICADA.
+NO puede haber campos vacíos ni "<p></p>".
+
+Keyword: {$keyword}
+Tipo: {$tipo}
+BRIEF:
+- Ángulo: {$angle}
+- Tono: {$tone}
+- CTA: {$cta}
+
+Reglas clave:
+- clients_subtitle MUY CORTO (6–12 palabras)
+- clients_p_html NO debe copiar pack_p_html
+
+NO repetir títulos:
+{$noRepetirTitles}
+
+NO repetir textos:
+{$noRepetirCorpus}
+
+BORRADOR:
+{$draftShort}
+PROMPT;
+    }
+
+    private function promptRepairJson(string $keyword, array $json, string $noRepetirTitles, string $noRepetirCorpus, array $brief): string
+    {
+        $short = mb_substr(json_encode($json, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 8500);
+        $angle = $this->toStr($brief['angle'] ?? '');
+        $tone  = $this->toStr($brief['tone'] ?? '');
+
+        return <<<PROMPT
+Corrige este JSON para que cumpla reglas y sea distinto.
+Devuelve SOLO JSON válido con el MISMO esquema. RESPUESTA MINIFICADA.
+NO puede haber campos vacíos ni "<p></p>".
+
+Keyword: {$keyword}
+Ángulo: {$angle}
+Tono: {$tone}
+
+Checklist:
+- Solo 1 H1: hero_h1 (no uses <h1>)
+- 4 features / 9 faq exactas
+- clients_subtitle MUY CORTO (6–12 palabras)
+- clients_p_html distinto a pack_p_html
+- HTML: <p>, <strong>, <br>
+- Nada vacío / nada "<p></p>"
+
+NO repetir títulos:
+{$noRepetirTitles}
+
+NO repetir textos:
+{$noRepetirCorpus}
+
+JSON a reparar:
+{$short}
+PROMPT;
+    }
+
+    // ===========================================================
+    // Anti-repetición
+    // ===========================================================
+    private function isTooSimilarToAnyPrevious(array $copy, array $usedTitles, array $usedCorpus): bool
+    {
+        $title = mb_strtolower(trim($this->toStr($copy['seo_title'] ?? $copy['hero_h1'] ?? '')));
+        if ($title !== '') {
+            foreach ($usedTitles as $t) {
+                $t2 = mb_strtolower(trim((string)$t));
+                if ($t2 !== '' && $this->jaccardBigrams($title, $t2) >= 0.65) return true;
+            }
+        }
+
+        $text = $this->copyTextFromArray($copy);
+        foreach ($usedCorpus as $corp) {
+            $corp = trim((string)$corp);
+            if ($corp === '') continue;
+            if ($this->jaccardBigrams($text, $corp) >= 0.50) return true;
+        }
+
+        return false;
+    }
+
+    private function violatesSeoHardRules(array $copy): bool
+    {
+        $all = json_encode($copy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (is_string($all) && preg_match('~<\s*/?\s*h1\b~i', $all)) return true;
+
+        $seo = $this->toStr($copy['seo_title'] ?? '');
+        if ($seo !== '' && mb_strlen($seo) > 70) return true;
+
+        if (trim($this->toStr($copy['hero_h1'] ?? '')) === '') return true;
+
+        return false;
+    }
+
+    private function jaccardBigrams(string $a, string $b): float
+    {
+        $A = $this->bigrams($a);
+        $B = $this->bigrams($b);
+        if (!$A || !$B) return 0.0;
+        $inter = array_intersect_key($A, $B);
+        $union = $A + $B;
+        $i = count($inter);
+        $u = count($union);
+        return $u === 0 ? 0.0 : ($i / $u);
+    }
+
+    private function bigrams(string $s): array
+    {
+        $s = mb_strtolower($s);
+        $s = preg_replace('~\s+~u', ' ', $s);
+        $s = trim($s);
+        if ($s === '') return [];
+        $chars = preg_split('~~u', $s, -1, PREG_SPLIT_NO_EMPTY);
+        $out = [];
+        $n = count($chars);
+        for ($i = 0; $i < $n - 1; $i++) $out[$chars[$i] . $chars[$i + 1]] = 1;
+        return $out;
     }
 
     // ===========================================================
@@ -674,10 +1207,8 @@ PROMPT;
         foreach ($corpusArr as $t) {
             $t = trim((string)$t);
             if ($t === '') continue;
-
             $t = mb_substr($t, 0, 380);
             $chunks[] = $t;
-
             $joined = implode("\n---\n", $chunks);
             if (mb_strlen($joined) >= $maxChars) break;
         }
@@ -693,22 +1224,75 @@ PROMPT;
         if ($draftJson === '') return '';
         $arr = json_decode($draftJson, true);
         if (!is_array($arr)) return '';
+        return $this->copyTextFromArray($arr);
+    }
 
+    private function copyTextFromArray(array $copy): string
+    {
         $parts = [];
-        foreach ($arr as $k => $v) {
-            if ($k === 'seo_title' || $k === 'meta_description') $parts[] = strip_tags((string)$v);
-            if (is_string($k) && str_starts_with($k, '{{')) {
-                $parts[] = strip_tags((string)$v);
+        foreach ([
+            'seo_title','hero_kicker','hero_h1','hero_p_html',
+            'kit_h1','kit_p_html','pack_h2','pack_p_html','price_h2',
+            'clients_label','clients_subtitle','clients_p_html',
+            'reviews_label','testimonios_title','projects_title',
+            'faq_title','final_cta_h3','btn_presupuesto','btn_reunion',
+            'kitdigital_bold','kitdigital_p_html','btn_kitdigital'
+        ] as $k) {
+            $parts[] = strip_tags($this->toStr($copy[$k] ?? ''));
+        }
+
+        if (!empty($copy['features']) && is_array($copy['features'])) {
+            foreach ($copy['features'] as $f) {
+                if (!is_array($f)) continue;
+                $parts[] = strip_tags($this->toStr($f['title'] ?? ''));
+                $parts[] = strip_tags($this->toStr($f['p_html'] ?? ''));
             }
         }
+
+        if (!empty($copy['faq']) && is_array($copy['faq'])) {
+            foreach ($copy['faq'] as $q) {
+                if (!is_array($q)) continue;
+                $parts[] = strip_tags($this->toStr($q['q'] ?? ''));
+                $parts[] = strip_tags($this->toStr($q['a_html'] ?? ''));
+            }
+        }
+
         $txt = implode(' ', array_filter($parts));
         $txt = preg_replace('~\s+~u', ' ', $txt);
         return trim((string)$txt);
     }
 
+    private function toStr(mixed $v): string
+    {
+        if ($v === null) return '';
+        if (is_string($v)) return $v;
+        if (is_int($v) || is_float($v)) return (string)$v;
+        if (is_bool($v)) return $v ? '1' : '0';
+        if (is_array($v)) {
+            foreach (['text','content','value','html'] as $k) {
+                if (array_key_exists($k, $v)) return $this->toStr($v[$k]);
+            }
+            $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return is_string($j) ? $j : '';
+        }
+        if (is_object($v)) {
+            if ($v instanceof \Stringable) return (string)$v;
+            $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return is_string($j) ? $j : '';
+        }
+        return '';
+    }
+
     private function pick(array $arr): string
     {
         return $arr[random_int(0, count($arr) - 1)];
+    }
+
+    private function shortKw(): string
+    {
+        $kw = trim((string)$this->keyword);
+        if ($kw === '') return 'tu proyecto';
+        return mb_substr($kw, 0, 70);
     }
 
     private function isBlankHtml(string $html): bool
@@ -717,46 +1301,35 @@ PROMPT;
         return $txt === '';
     }
 
+    private function stripH1Tags(string $html): string
+    {
+        $html = preg_replace('~<\s*h1\b[^>]*>~i', '', $html);
+        $html = preg_replace('~<\s*/\s*h1\s*>~i', '', $html);
+        return (string)$html;
+    }
+
     private function keepAllowedInlineHtml(string $html): string
     {
         $clean = strip_tags((string)$html, '<p><strong><br>');
         $clean = preg_replace('~\s+~u', ' ', $clean);
         $clean = str_replace(['</p> <p>','</p><p>'], '</p><p>', $clean);
         $clean = trim((string)$clean);
-
-        if ($clean !== '' && !preg_match('~^\s*<p>~i', $clean)) {
-            $clean = '<p>' . $clean . '</p>';
-        }
         return $clean;
     }
 
-    private function keepAllowedInlineStrong(string $html): string
+    private function requireText(mixed $value, string $field): string
     {
-        $clean = strip_tags((string)$html, '<strong><br>');
-        $clean = preg_replace('~\s+~u', ' ', $clean);
-        return trim($clean);
+        $v = trim(strip_tags($this->toStr($value)));
+        if ($v === '') throw new \RuntimeException("Campo vacío generado: {$field}");
+        return $v;
     }
 
-    private function sanitizeSeoTitle(string $seo, string $fallbackKw): string
+    private function requireHtml(mixed $html, string $field): string
     {
-        $seo = trim(strip_tags((string)$seo));
-        if ($seo === '') $seo = trim($fallbackKw);
-        if (mb_strlen($seo) > 65) $seo = rtrim(mb_substr($seo, 0, 65), " \t\n\r\0\x0B-–—|:");
-        return $seo;
-    }
-
-    private function sanitizeMetaDescription(string $desc, string $fallbackKw): string
-    {
-        $desc = trim(strip_tags((string)$desc));
-        $desc = preg_replace('~\s+~u', ' ', $desc);
-        if ($desc === '') return '';
-
-        if (mb_strlen($desc) > 155) $desc = rtrim(mb_substr($desc, 0, 155), " \t\n\r\0\x0B-–—|:");
-        if (mb_strlen($desc) < 90) {
-            $desc = trim($desc . ' Guía práctica sobre ' . mb_substr($fallbackKw, 0, 40) . '.');
-            if (mb_strlen($desc) > 155) $desc = mb_substr($desc, 0, 155);
+        $h = $this->keepAllowedInlineHtml($this->stripH1Tags($this->toStr($html)));
+        if ($h === '' || $this->isBlankHtml($h) || preg_match('~<p>\s*</p>~i', $h)) {
+            throw new \RuntimeException("HTML vacío generado: {$field}");
         }
-
-        return $desc;
+        return $h;
     }
 }
