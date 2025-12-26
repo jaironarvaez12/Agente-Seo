@@ -31,11 +31,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         public string $tipo,
         public string $keyword
     ) {
-        /**
-         * ✅ CAMBIO CLAVE:
-         * - Antes el job_uuid era determinístico (md5 del input) y por eso “reusabas” registros viejos.
-         * - Ahora es UUID real por dispatch. En reintentos del mismo job se mantiene.
-         */
+        // ✅ NUEVO por dispatch (ya no reaprovecha registros antiguos)
         $this->jobUuid = (string) Str::uuid();
     }
 
@@ -45,12 +41,11 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
         try {
             // ===========================================================
-            // 1) Crear registro NUEVO por dispatch (job_uuid real)
+            // 1) Registro
             // ===========================================================
             $registro = $this->getOrCreateRegistro();
             $this->registroId = (int) $registro->id_dominio_contenido_detalle;
 
-            // Si ya está generado (p.ej reintento) no regenerar.
             if ($registro->estatus === 'generado' && !empty($registro->contenido_html)) {
                 return;
             }
@@ -66,7 +61,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             // ===========================================================
             $apiKey = (string) env('DEEPSEEK_API_KEY', '');
             $model  = (string) env('DEEPSEEK_MODEL', 'deepseek-chat');
-
             if ($apiKey === '') {
                 throw new \RuntimeException('NO_RETRY: DEEPSEEK_API_KEY no configurado');
             }
@@ -91,7 +85,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $noRepetirCorpus = $this->compactHistory($usedCorpus, 2000);
 
             // ===========================================================
-            // 4) Cargar plantilla Elementor + extraer tokens reales
+            // 4) Cargar plantilla + tokens
             // ===========================================================
             [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
 
@@ -103,7 +97,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             }
 
             // ===========================================================
-            // 5) Generar contenido EXACTO para esos tokens
+            // 5) Generar valores para tokens (IA)
             // ===========================================================
             $brief = $this->creativeBrief($this->keyword);
 
@@ -119,7 +113,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             );
 
             // ===========================================================
-            // 6) Reemplazar tokens en TODO el JSON
+            // 6) Reemplazar tokens
             // ===========================================================
             $dict = [];
             foreach ($values as $k => $v) {
@@ -142,7 +136,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             if ($replacedCount < 1) {
                 throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Template: {$tplPath}");
             }
-
             if (!empty($remaining)) {
                 throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 120)));
             }
@@ -193,22 +186,19 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         }
     }
 
-    // ===========================================================
-    // Registro (NUEVO por dispatch; estable en reintentos)
-    // ===========================================================
     private function getOrCreateRegistro(): Dominios_Contenido_DetallesModel
     {
         $existing = Dominios_Contenido_DetallesModel::where('job_uuid', $this->jobUuid)->first();
         if ($existing) return $existing;
 
         return Dominios_Contenido_DetallesModel::create([
-            'job_uuid'              => $this->jobUuid,
-            'id_dominio_contenido'  => (int)$this->idDominioContenido,
-            'id_dominio'            => (int)$this->idDominio,
-            'tipo'                  => $this->tipo,
-            'keyword'               => $this->keyword,
-            'estatus'               => 'en_proceso',
-            'modelo'                => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+            'job_uuid'             => $this->jobUuid,
+            'id_dominio_contenido' => (int)$this->idDominioContenido,
+            'id_dominio'           => (int)$this->idDominio,
+            'tipo'                 => $this->tipo,
+            'keyword'              => $this->keyword,
+            'estatus'              => 'en_proceso',
+            'modelo'               => env('DEEPSEEK_MODEL', 'deepseek-chat'),
         ]);
     }
 
@@ -250,7 +240,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     }
 
     // ===========================================================
-    // Extraer tokens reales y si requieren HTML o texto plano
+    // Tokens + contexto HTML
     // ===========================================================
     private function extractTokensAndContexts(array $tpl): array
     {
@@ -271,10 +261,10 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             foreach ($m[1] as $tokenKey) {
                 $key = (string)$tokenKey;
 
-                // Heurística: si el campo donde aparece suele renderizar HTML, lo marcamos.
+                // editor/html/content suelen ser HTML
                 $isHtml = in_array($parentKey, ['editor', 'html', 'content', 'description', 'p_html', 'a_html'], true);
 
-                // Botones en Elementor suelen usar "text" pero eso NO es HTML
+                // botones suelen ir en "text" (no HTML)
                 if ($parentKey === 'text') $isHtml = false;
 
                 if (!isset($meta[$key])) {
@@ -292,8 +282,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     }
 
     // ===========================================================
-    // Generación dinámica: pide a DeepSeek EXACTO lo que la plantilla usa
-    // + Parser robusto: acepta JSON plano o agrupado y elimina keys inválidas
+    // IA: Generar exacto para tokens
     // ===========================================================
     private function generateValuesForTemplateTokens(
         string $apiKey,
@@ -354,13 +343,12 @@ PLAIN_KEYS: {$plainList}
 HTML_KEYS: {$htmlList}
 
 Ejemplo de FORMA (no copies contenido):
-{"HERO_H1":"...","BTN_PRESUPUESTO":"...","P_01":"<p>...</p>"}
+{"HERO_H1":"...","BTN_PRESUPUESTO":"...","SECTION_1_P":"<p>...</p>"}
 PROMPT;
 
-        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 3600, temperature: 0.85, topP: 0.9, jsonMode: true);
-        $arr = $this->parseJsonStrict($raw); // ✅ robusto
+        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 3800, temperature: 0.85, topP: 0.9, jsonMode: true);
+        $arr = $this->parseJsonStrict($raw); // robusto
 
-        // Normalizar + fallbacks si queda vacío
         $out = [];
         foreach ($tokenMeta as $k => $m) {
             $val = $arr[$k] ?? '';
@@ -380,7 +368,6 @@ PROMPT;
             $out[$k] = $val;
         }
 
-        // Fallback extra: HERO_H1 nunca puede quedar vacío si existe
         if (isset($out['HERO_H1']) && trim($out['HERO_H1']) === '') {
             $out['HERO_H1'] = $this->fallbackTextFor('HERO_H1', $keyword);
         }
@@ -392,31 +379,32 @@ PROMPT;
     {
         $kw = trim($keyword) !== '' ? trim($keyword) : 'tu servicio';
 
+        // SECTION_X_TITLE
         if (preg_match('/^SECTION_(\d+)_TITLE$/', $tokenKey, $mm)) {
             $i = (int)$mm[1];
             $topics = [
                 1 => "Qué incluye el servicio",
                 2 => "Cómo trabajamos paso a paso",
-                3 => "Resultados que puedes esperar",
-                4 => "Entregables y tiempos",
-                5 => "Qué nos diferencia",
+                3 => "Entregables y tiempos",
+                4 => "Qué mejora en la página",
+                5 => "Errores comunes que evitamos",
                 6 => "Para quién es ideal",
-                7 => "Errores comunes que evitamos",
-                8 => "Preguntas típicas antes de empezar",
-                9 => "Optimización y mejora continua",
+                7 => "Preguntas típicas antes de empezar",
+                8 => "SEO sin relleno",
+                9 => "Conversión y CTA",
                 10 => "Estrategia y enfoque",
                 11 => "Contenido y estructura",
-                12 => "Diseño orientado a conversión",
-                13 => "SEO sin relleno",
-                14 => "Proceso de implementación",
+                12 => "Diseño orientado a acción",
+                13 => "Optimización continua",
+                14 => "Checklist de publicación",
                 15 => "Revisión y ajustes",
                 16 => "Soporte y acompañamiento",
                 17 => "Casos y ejemplos",
-                18 => "Checklist de publicación",
-                19 => "Medición y seguimiento",
-                20 => "Siguientes pasos",
-                21 => "Alcance del proyecto",
-                22 => "Requisitos para iniciar",
+                18 => "Medición y seguimiento",
+                19 => "Siguientes pasos",
+                20 => "Alcance del proyecto",
+                21 => "Requisitos para iniciar",
+                22 => "Preguntas frecuentes",
                 23 => "Bloque adicional",
                 24 => "Bloque adicional",
                 25 => "Bloque adicional",
@@ -426,16 +414,44 @@ PROMPT;
             return "{$base} para {$kw}";
         }
 
-        if (str_starts_with($tokenKey, 'BTN_') || in_array($tokenKey, ['BTN_PRESUPUESTO','BTN_REUNION','BTN_KITDIGITAL'], true)) {
-            return "Solicitar información";
+        // ✅ SECTION_X_P (contenido de sección)
+        if (preg_match('/^SECTION_(\d+)_P$/', $tokenKey, $mm)) {
+            $i = (int)$mm[1];
+            $base = [
+                1 => "Te dejamos una estructura clara con secciones listas para publicar y ajustar al contexto.",
+                2 => "Trabajamos por bloques: mensaje, beneficios, objeciones y CTA, manteniendo coherencia en todo.",
+                3 => "Definimos entregables y plazos para que sepas exactamente qué se publica y cuándo.",
+                4 => "Mejoras típicas: claridad del mensaje, orden visual y llamadas a la acción más consistentes.",
+                5 => "Evitamos relleno, repetición y promesas vagas; cada bloque tiene un objetivo real.",
+                6 => "Ideal si necesitas una página que explique bien tu oferta y convierta sin complicarte.",
+                7 => "Respondemos dudas clave para reducir fricción y facilitar la decisión.",
+                8 => "SEO natural: intención + semántica sin repetir keywords como robot.",
+                9 => "Incluimos CTA y microcopy para guiar al usuario a la acción.",
+                10 => "Alineamos propuesta, público y ángulo para que el contenido tenga dirección.",
+                11 => "El contenido se diseña para escaneo: titulares claros y párrafos cortos.",
+                12 => "Diseño y texto se apoyan: jerarquía, ritmo y foco en lo importante.",
+                13 => "Dejamos base para iterar: ajustar secciones según resultados reales.",
+                14 => "Checklist final para publicar sin errores: SEO básico, enlaces, CTA y legibilidad.",
+                15 => "Incluimos una revisión de coherencia: tono, claridad y consistencia.",
+                16 => "Si aplica, te guiamos con pasos claros para que no se quede a medias.",
+                17 => "Ejemplos/variantes para adaptar a tu caso sin duplicar contenido.",
+                18 => "Recomendaciones de medición para saber qué funciona y qué ajustar.",
+                19 => "Siguiente paso claro: llamada, presupuesto o diagnóstico según el caso.",
+                20 => "Alcance definido para evitar expectativas irreales y entregas infinitas.",
+                21 => "Qué necesitamos de ti: oferta, público, referencias y 2–3 datos clave.",
+                22 => "Preguntas frecuentes enfocadas en objeciones reales y decisiones.",
+                23 => "Bloque extra adaptable según tu sector y prioridades.",
+                24 => "Bloque extra adaptable según tu sector y prioridades.",
+                25 => "Bloque extra adaptable según tu sector y prioridades.",
+                26 => "Bloque extra adaptable según tu sector y prioridades.",
+            ];
+            return $base[$i] ?? "Contenido breve y adaptable para {$kw}, pensado para claridad y conversión.";
         }
+
+        if (str_starts_with($tokenKey, 'BTN_')) return "Solicitar información";
 
         if ($tokenKey === 'HERO_H1') return "{$kw} con estructura y copy que convierten";
         if ($tokenKey === 'HERO_KICKER') return "Mensaje claro, ejecución rápida";
-
-        // FAQ típicos si tu template usa FAQ_1_Q etc
-        if (preg_match('/^FAQ_(\d+)_Q$/', $tokenKey)) return "¿Qué incluye el servicio?";
-        if (preg_match('/^FAQ_(\d+)_A$/', $tokenKey)) return "Incluye estructura, textos y bloques listos para publicar.";
 
         return "Contenido para {$kw}";
     }
@@ -490,12 +506,7 @@ PROMPT;
         return $text;
     }
 
-    /**
-     * ✅ Parser robusto:
-     * - Acepta JSON plano
-     * - Si DeepSeek agrupa en PLAIN_KEYS/HTML_KEYS, lo aplana
-     * - Elimina keys inválidas ("" o espacios)
-     */
+    // ✅ Parser robusto (aplana si DeepSeek inventa grupos)
     private function parseJsonStrict(string $raw): array
     {
         $raw = trim((string)$raw);
@@ -515,7 +526,6 @@ PROMPT;
             throw new \RuntimeException('DeepSeek no devolvió JSON válido. Snippet: ' . $snip);
         }
 
-        // Si viene agrupado, lo aplanamos
         $flat = [];
         if (isset($data['PLAIN_KEYS']) && is_array($data['PLAIN_KEYS'])) {
             foreach ($data['PLAIN_KEYS'] as $k => $v) $flat[$k] = $v;
@@ -525,7 +535,6 @@ PROMPT;
         }
         if (!empty($flat)) $data = $flat;
 
-        // Eliminar keys inválidas
         $clean = [];
         foreach ($data as $k => $v) {
             if (!is_string($k)) continue;
@@ -538,7 +547,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // Reemplazo tokens en el JSON Elementor
+    // Reemplazo tokens
     // ===========================================================
     private function replaceTokensDeep(mixed &$node, array $dict, int &$count): void
     {
@@ -593,7 +602,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // Utils texto
+    // Utils
     // ===========================================================
     private function compactHistory(array $corpusArr, int $maxChars = 2500): string
     {
@@ -619,9 +628,7 @@ PROMPT;
         $arr = json_decode($draftJson, true);
         if (!is_array($arr)) return '';
         $parts = [];
-        foreach ($arr as $k => $v) {
-            $parts[] = strip_tags($this->toStr($v));
-        }
+        foreach ($arr as $k => $v) $parts[] = strip_tags($this->toStr($v));
         $txt = implode(' ', array_filter($parts));
         $txt = preg_replace('~\s+~u', ' ', $txt);
         return trim((string)$txt);
@@ -633,19 +640,8 @@ PROMPT;
         if (is_string($v)) return $v;
         if (is_int($v) || is_float($v)) return (string)$v;
         if (is_bool($v)) return $v ? '1' : '0';
-        if (is_array($v)) {
-            foreach (['text','content','value','html'] as $k) {
-                if (array_key_exists($k, $v)) return $this->toStr($v[$k]);
-            }
-            $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-            return is_string($j) ? $j : '';
-        }
-        if (is_object($v)) {
-            if ($v instanceof \Stringable) return (string)$v;
-            $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-            return is_string($j) ? $j : '';
-        }
-        return '';
+        $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        return is_string($j) ? $j : '';
     }
 
     private function isBlankHtml(string $html): bool
