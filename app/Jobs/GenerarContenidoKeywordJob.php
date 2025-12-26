@@ -4,7 +4,6 @@ namespace App\Jobs;
 
 use Illuminate\Bus\Queueable;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -138,7 +137,10 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
                 $final = $candidateArr;
 
-                if (!$this->isTooSimilarToAnyPrevious($candidateArr, $usedTitles, $usedCorpus) && !$this->violatesSeoHardRules($candidateArr)) {
+                if (
+                    !$this->isTooSimilarToAnyPrevious($candidateArr, $usedTitles, $usedCorpus) &&
+                    !$this->violatesSeoHardRules($candidateArr)
+                ) {
                     break;
                 }
 
@@ -162,7 +164,11 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             // ✅ NO uses umbral fijo ">=8" (eso rompe plantillas pequeñas)
             if ($replacedCount < 1) {
-                throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Template: {$tplPath}");
+                // Debug útil: si no hay tokens, o no matchean
+                if (empty($remaining)) {
+                    throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token y NO se detectaron tokens {{...}} en el template. Template: {$tplPath}");
+                }
+                throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Tokens detectados: " . implode(' | ', array_slice($remaining, 0, 50)) . " | Template: {$tplPath}");
             }
             if (!empty($remaining)) {
                 throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remaining, 0, 50)));
@@ -184,17 +190,17 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             // 7) Guardar
             // ===========================================================
             $registro->update([
-                'title'         => $title,
-                'slug'          => $slug,
-                'draft_html'    => json_encode($final, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'contenido_html'=> json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'estatus'       => 'generado',
-                'error'         => null,
+                'title'          => $title,
+                'slug'           => $slug,
+                'draft_html'     => json_encode($final, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'contenido_html' => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'estatus'        => 'generado',
+                'error'          => null,
             ]);
 
         } catch (\Throwable $e) {
             if ($registro) {
-                $isLast = ($this->attempts() >= (int)$this->tries);
+                $isLast  = ($this->attempts() >= (int)$this->tries);
                 $noRetry = str_contains($e->getMessage(), 'NO_RETRY:');
 
                 $registro->update([
@@ -221,7 +227,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
         try {
             return Dominios_Contenido_DetallesModel::create([
-                'job_uuid'            => $this->jobUuid,
+                'job_uuid'             => $this->jobUuid,
                 'id_dominio_contenido' => (int)$this->idDominioContenido,
                 'id_dominio'           => (int)$this->idDominio,
                 'tipo'                 => $this->tipo,
@@ -542,7 +548,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // VALIDATE / FALLBACKS (tu idea, pero sin loops)
+    // VALIDATE / FALLBACKS
     // ===========================================================
     private function validateOrRepairCopy(
         string $apiKey,
@@ -756,9 +762,9 @@ PROMPT;
         if ($needText('btn_presupuesto'))  $copy['btn_presupuesto'] = $this->pick(["Pedir propuesta","Solicitar presupuesto","Ver opciones"]);
         if ($needText('btn_reunion'))      $copy['btn_reunion'] = $this->pick(["Agendar llamada","Reservar llamada","Hablar ahora"]);
 
-        if ($needText('kitdigital_bold'))  $copy['kitdigital_bold'] = $this->pick(["Información de ayudas","Opciones disponibles","Kit Digital"]);
-        if ($needHtml('kitdigital_p_html'))$copy['kitdigital_p_html'] = "<p>Si aplica, te guiamos en el proceso y dejamos la entrega lista para publicar con pasos claros y entregables definidos.</p>";
-        if ($needText('btn_kitdigital'))   $copy['btn_kitdigital'] = $this->pick(["Ver información","Consultar","Empezar"]);
+        if ($needText('kitdigital_bold'))   $copy['kitdigital_bold'] = $this->pick(["Información de ayudas","Opciones disponibles","Kit Digital"]);
+        if ($needHtml('kitdigital_p_html')) $copy['kitdigital_p_html'] = "<p>Si aplica, te guiamos en el proceso y dejamos la entrega lista para publicar con pasos claros y entregables definidos.</p>";
+        if ($needText('btn_kitdigital'))    $copy['btn_kitdigital'] = $this->pick(["Ver información","Consultar","Empezar"]);
 
         if (!isset($copy['features']) || !is_array($copy['features'])) $copy['features'] = [];
         if (!isset($copy['faq']) || !is_array($copy['faq'])) $copy['faq'] = [];
@@ -806,15 +812,27 @@ PROMPT;
     }
 
     // ===========================================================
-    // TOKENS (tu plantilla "pretty tokens")
+    // TOKENS (Soporta "pretty" + "legacy")
     // ===========================================================
     private function fillElementorTemplate_byPrettyTokens_withStats(array $tpl, array $copy): array
     {
         $copy = $this->validateAndFixCopy($copy);
+
+        // dict con llaves {{TOKEN}}
         $dict = $this->buildPrettyTokenDictionary($copy);
 
+        // Normaliza para reemplazo tolerante a espacios/case:
+        //   {{ HERO_H1 }} / {{hero_h1}} / {{HERO_H1}}
+        // dictNorm: TOKEN_NAME => value
+        $dictNorm = [];
+        foreach ($dict as $tok => $val) {
+            $name = strtoupper(trim((string)$tok));
+            $name = trim($name, "{} \t\n\r\0\x0B");
+            $dictNorm[$name] = (string)$val;
+        }
+
         $replacedCount = 0;
-        $this->replaceTokensDeep($tpl, $dict, $replacedCount);
+        $this->replaceTokensDeep($tpl, $dictNorm, $replacedCount);
 
         $remaining = $this->collectRemainingTokensDeep($tpl);
 
@@ -869,27 +887,37 @@ PROMPT;
         ];
 
         for ($i = 0; $i < 9; $i++) {
-            $dict['{{FAQ_' . ($i + 1) . '_Q}}'] = trim(strip_tags($this->toStr($copy['faq'][$i]['q'])));
+            $dict['{{FAQ_' . ($i + 1) . '_Q}}'] = trim(strip_tags($this->toStr($copy['faq'][$i]['q'])));;
             $dict['{{FAQ_' . ($i + 1) . '_A}}'] = $this->keepAllowedInlineHtml($this->toStr($copy['faq'][$i]['a_html']));
         }
 
-        // Tokens universales opcionales
+        // Tokens universales (ampliados)
         foreach ($this->buildUniversalTokenValues($copy) as $tok => $val) {
+            $dict[$tok] = $val;
+        }
+
+        // ✅ Aliases LEGACY para soportar plantillas con {{H_01}}, {{P_01}}, {{BTN_01}}, {{IL_01}}, etc.
+        foreach ($this->buildLegacyTokenAliasesFromDict($dict) as $tok => $val) {
             $dict[$tok] = $val;
         }
 
         return $dict;
     }
 
+    // ✅ UNIVERSALES ampliados (antes 12/6: ahora 120/30)
     private function buildUniversalTokenValues(array $copy): array
     {
         $out = [];
-        for ($i=1; $i<=12; $i++) {
+
+        $maxSections = 120;
+        $maxBadges   = 30;
+
+        for ($i=1; $i<=$maxSections; $i++) {
             $out["{{SECTION_{$i}_TITLE}}"] = "Sección {$i}";
-            $out["{{SECTION_{$i}_P}}"] = "<p>Texto breve y adaptable para esta sección.</p>";
-            $out["{{BULLET_{$i}}}"] = "Punto {$i}";
+            $out["{{SECTION_{$i}_P}}"]     = "<p>Texto breve y adaptable para esta sección.</p>";
+            $out["{{BULLET_{$i}}}"]        = "Punto {$i}";
         }
-        for ($i=1; $i<=6; $i++) $out["{{BADGE_{$i}}}"] = "Etiqueta {$i}";
+        for ($i=1; $i<=$maxBadges; $i++) $out["{{BADGE_{$i}}}"] = "Etiqueta {$i}";
 
         $out["{{CTA_1_TITLE}}"] = trim(strip_tags($this->toStr($copy['final_cta_h3'] ?? '')));
         $out["{{CTA_1_P}}"]     = $this->keepAllowedInlineHtml($this->toStr($copy['hero_p_html'] ?? '<p></p>'));
@@ -902,6 +930,91 @@ PROMPT;
         $out["{{CTA_3_TITLE}}"] = trim(strip_tags($this->toStr($copy['kitdigital_bold'] ?? '')));
         $out["{{CTA_3_P}}"]     = $this->keepAllowedInlineHtml($this->toStr($copy['kitdigital_p_html'] ?? '<p></p>'));
         $out["{{CTA_3_BTN}}"]   = trim(strip_tags($this->toStr($copy['btn_kitdigital'] ?? '')));
+
+        return $out;
+    }
+
+    // ✅ NUEVO: aliases legacy -> valores reales del dict
+    private function buildLegacyTokenAliasesFromDict(array $dict): array
+    {
+        $out = [];
+
+        $get = function(string $k, string $fallback = "") use ($dict) {
+            return array_key_exists($k, $dict) ? (string)$dict[$k] : $fallback;
+        };
+
+        $maxH   = 120;
+        $maxP   = 120;
+        $maxBTN = 60;
+        $maxIL  = 120;
+
+        // H_01..H_12 principales; 13+ => SECTION_(i-12)_TITLE
+        for ($i=1; $i<=$maxH; $i++) {
+            $n2 = str_pad((string)$i, 2, "0", STR_PAD_LEFT);
+
+            if ($i === 1)       $val = $get("{{HERO_H1}}");
+            else if ($i === 2)  $val = $get("{{HERO_KICKER}}");
+            else if ($i === 3)  $val = $get("{{PACK_H2}}");
+            else if ($i === 4)  $val = $get("{{KIT_H1}}");
+            else if ($i === 5)  $val = $get("{{PRICE_H2}}");
+            else if ($i === 6)  $val = $get("{{CLIENTS_LABEL}}");
+            else if ($i === 7)  $val = $get("{{CLIENTS_SUBTITLE}}");
+            else if ($i === 8)  $val = $get("{{TESTIMONIOS_TITLE}}");
+            else if ($i === 9)  $val = $get("{{PROJECTS_TITLE}}");
+            else if ($i === 10) $val = $get("{{FAQ_TITLE}}");
+            else if ($i === 11) $val = $get("{{FINAL_CTA}}");
+            else if ($i === 12) $val = $get("{{KITDIGITAL_BOLD}}");
+            else {
+                $sec = $i - 12;
+                $val = $get("{{SECTION_{$sec}_TITLE}}", "Sección {$sec}");
+            }
+
+            $out["{{H_{$n2}}}"] = $val; // {{H_01}}
+            $out["{{H_{$i}}}"]  = $val; // {{H_1}} por si existe
+        }
+
+        // P_01..P_05 principales; 06+ => SECTION_(i-5)_P
+        for ($i=1; $i<=$maxP; $i++) {
+            $n2 = str_pad((string)$i, 2, "0", STR_PAD_LEFT);
+
+            if ($i === 1)       $val = $get("{{HERO_P}}");
+            else if ($i === 2)  $val = $get("{{PACK_P}}");
+            else if ($i === 3)  $val = $get("{{KIT_P}}");
+            else if ($i === 4)  $val = $get("{{CLIENTS_P}}");
+            else if ($i === 5)  $val = $get("{{KITDIGITAL_P}}");
+            else {
+                $sec = $i - 5;
+                $val = $get("{{SECTION_{$sec}_P}}", "<p>Texto breve y adaptable para esta sección.</p>");
+            }
+
+            $out["{{P_{$n2}}}"] = $val;
+            $out["{{P_{$i}}}"]  = $val;
+        }
+
+        // BTN_01.. = botones principales / CTAs
+        for ($i=1; $i<=$maxBTN; $i++) {
+            $n2 = str_pad((string)$i, 2, "0", STR_PAD_LEFT);
+
+            if ($i === 1)      $val = $get("{{BTN_PRESUPUESTO}}");
+            else if ($i === 2) $val = $get("{{BTN_REUNION}}");
+            else if ($i === 3) $val = $get("{{BTN_KITDIGITAL}}");
+            else if ($i === 4) $val = $get("{{CTA_1_BTN}}", $get("{{BTN_PRESUPUESTO}}"));
+            else if ($i === 5) $val = $get("{{CTA_2_BTN}}", $get("{{BTN_REUNION}}"));
+            else if ($i === 6) $val = $get("{{CTA_3_BTN}}", $get("{{BTN_KITDIGITAL}}"));
+            else               $val = $get("{{CTA_1_BTN}}", $get("{{BTN_PRESUPUESTO}}"));
+
+            $out["{{BTN_{$n2}}}"] = $val;
+            $out["{{BTN_{$i}}}"]  = $val;
+        }
+
+        // IL_01.. = bullets/icon list items
+        for ($i=1; $i<=$maxIL; $i++) {
+            $n2 = str_pad((string)$i, 2, "0", STR_PAD_LEFT);
+            $val = $get("{{BULLET_{$i}}}", "Punto {$i}");
+
+            $out["{{IL_{$n2}}}"] = $val;
+            $out["{{IL_{$i}}}"]  = $val;
+        }
 
         return $out;
     }
@@ -919,27 +1032,40 @@ PROMPT;
         return implode('', $parts);
     }
 
-    private function replaceTokensDeep(mixed &$node, array $dict, int &$count): void
+    // ✅ Reemplazo tolerante a espacios/case: {{ HERO_H1 }} == {{hero_h1}} == {{HERO_H1}}
+    // $dictNorm: TOKEN_NAME => value
+    private function replaceTokensDeep(mixed &$node, array $dictNorm, int &$count): void
     {
         if (is_array($node)) {
-            foreach ($node as &$v) $this->replaceTokensDeep($v, $dict, $count);
+            foreach ($node as &$v) $this->replaceTokensDeep($v, $dictNorm, $count);
             return;
         }
         if (!is_string($node) || $node === '') return;
         if (!str_contains($node, '{{')) return;
 
         $orig = $node;
-        $node = strtr($node, $dict);
+
+        $node = preg_replace_callback('/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/', function ($m) use ($dictNorm) {
+            $k = strtoupper($m[1]);
+            return array_key_exists($k, $dictNorm) ? (string)$dictNorm[$k] : $m[0];
+        }, $node);
+
         if ($node !== $orig) $count++;
     }
 
+    // ✅ Detecta tokens restantes aunque tengan espacios: {{ H_01 }}
     private function collectRemainingTokensDeep(mixed $node): array
     {
         $found = [];
         $walk = function ($n) use (&$walk, &$found) {
             if (is_array($n)) { foreach ($n as $v) $walk($v); return; }
             if (!is_string($n) || $n === '') return;
-            if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $n, $m)) foreach ($m[0] as $tok) $found[] = $tok;
+            if (preg_match_all('/\{\{\s*[A-Za-z0-9_]+\s*\}\}/', $n, $m)) {
+                foreach ($m[0] as $tok) {
+                    $tok = preg_replace('/\s+/', '', $tok); // normaliza espacios
+                    $found[] = $tok;
+                }
+            }
         };
         $walk($node);
         $found = array_values(array_unique($found));
@@ -947,7 +1073,7 @@ PROMPT;
         return $found;
     }
 
-    // Post-pass opcional (tu idea)
+    // Post-pass opcional
     private function forceReplaceStaticTextsInTemplate(array $tpl, array $copy): array
     {
         $mapExact = [];
@@ -1007,7 +1133,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // PROMPTS (tus prompts, limpios)
+    // PROMPTS
     // ===========================================================
     private function creativeBrief(string $keyword): array
     {
