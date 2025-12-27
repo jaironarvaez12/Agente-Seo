@@ -42,7 +42,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
         try {
             // ===========================================================
-            // 1) Registro por job_uuid (para retries del mismo job)
+            // 1) Registro por job_uuid (solo para retries del mismo job)
             // ===========================================================
             $registro = $this->getOrCreateRegistro();
             $this->registroId = (int) $registro->id_dominio_contenido_detalle;
@@ -103,7 +103,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             for ($cycle = 1; $cycle <= 2; $cycle++) {
                 $brief = $this->creativeBrief();
-                $seed  = $this->stableSeedInt($this->jobUuid . '|' . $this->registroId . "|cycle={$cycle}");
+                $seed  = $this->stableSeedInt($this->jobUuid . '|' . (int)$this->registroId . "|cycle={$cycle}");
 
                 // PLAN de temas (cambia en cada job/cycle)
                 $themePlan = $this->buildThemePlan($seed, 40, 26);
@@ -125,8 +125,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
                 $finalValues = $values;
 
-                // umbral: si se parece mucho, reintenta 1 vez con otro cycle/seed
-                if ($sim < 0.45) break;
+                if ($sim < 0.45) break; // si aún se parece mucho, reintenta 1 vez
             }
 
             if (!is_array($finalValues)) {
@@ -245,7 +244,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     }
 
     // ===========================================================
-    // Detectar tokens + tipo (plain vs editor)
+    // Detectar tokens + tipo (plain vs editor) + wrap_p
     // ===========================================================
     private function collectTokensMeta(array $tpl): array
     {
@@ -255,7 +254,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             if (!is_array($node)) return;
 
             foreach ($node as $k => $v) {
-                // tokens en strings
                 if (is_string($k) && in_array($k, ['editor','title','text'], true) && is_string($v) && str_contains($v, '{{')) {
                     if (preg_match_all('/\{\{([A-Z0-9_]+)\}\}/', $v, $m)) {
                         foreach (($m[1] ?? []) as $tok) {
@@ -263,7 +261,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                             if ($tok === '') continue;
 
                             $type = ($k === 'editor') ? 'editor' : 'plain';
-
                             $wrapP = (bool) preg_match('~<p>\s*\{\{' . preg_quote($tok, '~') . '\}\}\s*</p>~i', $v);
 
                             if (!isset($meta[$tok])) {
@@ -301,7 +298,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     ): array {
         $allKeys = array_keys($tokensMeta);
 
-        // Orden: primero no-section, luego SECTION titles, luego SECTION p (ayuda a coherencia)
         usort($allKeys, function ($a, $b) {
             $ra = $this->tokenRank((string)$a);
             $rb = $this->tokenRank((string)$b);
@@ -314,7 +310,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
         $variation = "seed={$seed}|job=" . substr($this->jobUuid, 0, 8) . "|rid=" . (int)$this->registroId;
 
-        foreach ($chunks as $idx => $chunkKeys) {
+        foreach ($chunks as $chunkKeys) {
             $skeleton = [];
             foreach ($chunkKeys as $k) $skeleton[$k] = "";
 
@@ -333,7 +329,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $briefCTA   = $this->toStr($brief['cta'] ?? '');
             $briefAud   = $this->toStr($brief['audience'] ?? '');
 
-            // resumen de lo ya generado (para NO repetir)
             $alreadySectionTitles = [];
             foreach ($values as $k => $v) {
                 if (preg_match('~^SECTION_\d+_TITLE$~', (string)$k)) {
@@ -343,7 +338,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $alreadySectionTitles = array_slice(array_filter($alreadySectionTitles), 0, 20);
             $alreadyStr = implode(' | ', $alreadySectionTitles);
 
-            // plan de temas (26 líneas)
             $planLines = [];
             for ($i=1; $i<=26; $i++) {
                 $planLines[] = "SECTION_{$i}: " . ($themePlan[$i] ?? 'Tema');
@@ -366,7 +360,7 @@ BRIEF:
 - Público: {$briefAud}
 - CTA: {$briefCTA}
 
-PLAN DE TEMAS (OBLIGATORIO, debe variar entre secciones):
+PLAN DE TEMAS (OBLIGATORIO):
 {$planText}
 
 NO REPETIR TÍTULOS:
@@ -375,13 +369,14 @@ NO REPETIR TÍTULOS:
 NO REPETIR TEXTOS:
 {$noRepetirCorpus}
 
-YA USADOS (evita repetir estos títulos de sección):
+YA USADOS (evita repetir estos títulos):
 {$alreadyStr}
 
 REGLAS:
 - Devuelve EXACTAMENTE las keys del ESQUEMA (no agregues ni quites).
 - PROHIBIDO valores vacíos: nada de "" ni null.
-- Keys editor: texto 1–3 frases. Permite SOLO <strong> y <br>. NO uses <p>.
+- TODOS los valores deben ser STRING (nunca arrays ni objetos).
+- Keys editor: 1–3 frases. Permite SOLO <strong> y <br>. NO uses <p>.
 - Keys plain: solo texto plano (sin HTML).
 - SECTION_X_TITLE y SECTION_X_P deben seguir su tema del plan y ser DIFERENTES entre sí.
 - No repitas la keyword en todas las líneas.
@@ -400,15 +395,15 @@ PROMPT;
 
             $arr = $this->safeParseOrRepairForKeys($apiKey, $model, $raw, $chunkKeys, $brief, $variation);
 
-            // normalizar/limpiar + fallback variable
             foreach ($chunkKeys as $k) {
                 $k = (string)$k;
                 $meta = $tokensMeta[$k] ?? ['type' => 'plain', 'wrap_p' => false];
 
-                $val = $arr[$k] ?? '';
-                $val = $this->normalizeValueByTokenMeta($k, $val, $meta, $seed, $themePlan);
+                // ✅ FIX: fuerza siempre string (evita Array to string conversion)
+                $val = $this->toStr($arr[$k] ?? '');
 
-                // si sigue vacío => fallback
+                $val = $this->normalizeValueByTokenMeta($k, $val, $meta);
+
                 if ($this->isEmptyValue($val)) {
                     $val = $this->fallbackForToken($k, $meta, $seed, $themePlan);
                 }
@@ -417,16 +412,15 @@ PROMPT;
             }
         }
 
-        // Anti “todo igual”: si SECTION_X_P se repite, fuerza fallback único
+        // Anti repetición exacta en SECTION_P
         $seen = [];
         foreach ($values as $k => $v) {
             if (!preg_match('~^SECTION_(\d+)_P$~', (string)$k, $m)) continue;
-
             $plain = mb_strtolower(trim(strip_tags((string)$v)));
             if ($plain === '') continue;
 
             if (isset($seen[$plain])) {
-                $values[$k] = $this->fallbackForToken((string)$k, $tokensMeta[$k] ?? ['type'=>'editor','wrap_p'=>false], $seed + 77, $themePlan, forceUnique: true);
+                $values[$k] = $this->fallbackForToken((string)$k, $tokensMeta[$k] ?? ['type'=>'editor','wrap_p'=>false], $seed + 77, $themePlan, true);
             } else {
                 $seen[$plain] = true;
             }
@@ -502,7 +496,6 @@ PROMPT;
 
     private function shuffleDeterministic(array $arr, int $seed): array
     {
-        // Fisher–Yates con RNG simple estable
         $n = count($arr);
         $x = $seed;
         for ($i = $n - 1; $i > 0; $i--) {
@@ -609,7 +602,7 @@ Devuelve SOLO JSON válido. RESPUESTA MINIFICADA.
 VARIATION (NO imprimir): {$variation}
 
 Corrige el JSON roto y devuelve EXACTAMENTE las keys del ESQUEMA (sin agregar ni quitar).
-PROHIBIDO valores vacíos y PROHIBIDO keys vacías "".
+PROHIBIDO valores vacíos, PROHIBIDO keys vacías "" y PROHIBIDO arrays/objetos.
 
 Reglas:
 - Textos largos: solo texto + <strong> y <br>. NO uses <p>.
@@ -644,7 +637,7 @@ PROMPT;
         $data = json_decode($raw, true);
         if (!is_array($data)) throw new \RuntimeException('JSON inválido');
 
-        if (array_key_exists('', $data)) unset($data['']); // por si DeepSeek mete key vacía
+        if (array_key_exists('', $data)) unset($data['']);
 
         return $data;
     }
@@ -665,7 +658,6 @@ PROMPT;
         }
 
         if (array_key_exists('', $out)) unset($out['']);
-
         return $out;
     }
 
@@ -681,16 +673,15 @@ PROMPT;
     }
 
     // ===========================================================
-    // Normalización y fallbacks variables (no repetitivos)
+    // Normalización (según tokenMeta)
     // ===========================================================
-    private function normalizeValueByTokenMeta(string $k, mixed $v, array $meta, int $seed, array $themePlan): string
+    private function normalizeValueByTokenMeta(string $k, string $v, array $meta): string
     {
-        $type = $meta['type'] ?? 'plain';
+        $type  = $meta['type'] ?? 'plain';
         $wrapP = (bool)($meta['wrap_p'] ?? false);
 
         if ($type === 'editor') {
-            $s = $this->normalizeEditorFragment($this->toStr($v));
-            // si plantilla ya envuelve <p>{{TOKEN}}</p>, entonces debe ser texto (sin HTML)
+            $s = $this->normalizeEditorFragment($v);
             if ($wrapP) {
                 $s = trim(strip_tags($s));
                 $s = preg_replace('~\s+~u', ' ', (string)$s);
@@ -699,15 +690,13 @@ PROMPT;
             return $s;
         }
 
-        // plain
-        $s = trim(strip_tags($this->toStr($v)));
+        $s = trim(strip_tags($v));
         $s = preg_replace('~\s+~u', ' ', (string)$s);
         return trim((string)$s);
     }
 
     private function normalizeEditorFragment(string $html): string
     {
-        // permitimos solo <strong> y <br>, y si llega <p> lo quitamos
         $clean = strip_tags((string)$html, '<strong><br><p>');
         $clean = trim((string)$clean);
 
@@ -732,13 +721,11 @@ PROMPT;
 
         $kw = $this->shortKw();
 
-        // helper para seleccionar variante distinta siempre (por seed+tok)
         $pick = function(array $arr) use ($seed, $tok) {
             $i = $this->stableSeedInt($seed . '|' . $tok) % max(1, count($arr));
             return $arr[$i] ?? $arr[0];
         };
 
-        // SECTION titles/ps siguen plan de temas
         if (preg_match('~^SECTION_(\d+)_TITLE$~', $tok, $m)) {
             $i = (int)($m[1] ?? 1);
             $tema = $themePlan[$i] ?? "Tema {$i}";
@@ -767,12 +754,10 @@ PROMPT;
             $p = $pick($variants);
             if ($forceUnique) $p .= " (bloque {$i})";
 
-            // editor => puede incluir <strong>/<br>, pero NO <p>
-            if ($wrapP) return trim(strip_tags($p)); // si plantilla envuelve <p>
+            if ($wrapP) return trim(strip_tags($p));
             return ($type === 'editor') ? $p : trim(strip_tags($p));
         }
 
-        // Botones / hero / etc
         if (str_starts_with($tok, 'BTN_')) {
             $btn = match ($tok) {
                 'BTN_PRESUPUESTO' => $pick(["Solicitar presupuesto","Pedir propuesta","Ver opciones"]),
@@ -803,22 +788,22 @@ PROMPT;
         ]);
 
         if ($tok === 'FAQ_TITLE') return "Preguntas frecuentes";
+
         if ($tok === 'FINAL_CTA') {
             $txt = $pick([
                 "¿Quieres publicarlo y avanzar? <strong>Te guiamos con el siguiente paso.</strong>",
-                "Listo para mejorar el mensaje? <strong>Hagamos una propuesta clara.</strong>",
+                "¿Listo para mejorar el mensaje? <strong>Hagamos una propuesta clara.</strong>",
                 "¿Buscas una entrega sin vueltas? <strong>Agenda y lo estructuramos.</strong>",
             ]);
-            return ($type === 'editor') ? $txt : trim(strip_tags($txt));
+            return ($type === 'editor' && !$wrapP) ? $txt : trim(strip_tags($txt));
         }
 
-        // genérico
         $generic = $pick([
             "Contenido útil para {$kw}, listo para adaptar.",
             "Bloque preparado para {$kw} con enfoque claro.",
             "Texto ordenado para {$kw} sin relleno.",
         ]);
-        return ($type === 'editor') ? $generic : trim(strip_tags($generic));
+        return ($type === 'editor' && !$wrapP) ? $generic : trim(strip_tags($generic));
     }
 
     // ===========================================================
@@ -865,7 +850,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // Brief (se mezcla con seed/plan, así cambia temas)
+    // Brief
     // ===========================================================
     private function creativeBrief(): array
     {
@@ -889,14 +874,12 @@ PROMPT;
     }
 
     // ===========================================================
-    // Similaridad (para evitar “mismo contenido”)
+    // Similaridad
     // ===========================================================
     private function valuesToPlainText(array $values): string
     {
         $parts = [];
-        foreach ($values as $k => $v) {
-            $parts[] = strip_tags((string)$v);
-        }
+        foreach ($values as $v) $parts[] = strip_tags($this->toStr($v));
         $txt = implode(' ', $parts);
         $txt = preg_replace('~\s+~u', ' ', (string)$txt);
         return trim((string)$txt);
@@ -918,7 +901,7 @@ PROMPT;
     {
         $s = mb_strtolower($s);
         $s = preg_replace('~\s+~u', ' ', $s);
-        $s = trim((string)$s);
+        $s = trim($s);
         if ($s === '') return [];
         $chars = preg_split('~~u', $s, -1, PREG_SPLIT_NO_EMPTY);
         $out = [];
@@ -961,7 +944,7 @@ PROMPT;
     }
 
     // ===========================================================
-    // Utils
+    // Utils (✅ FIX anti Array->string)
     // ===========================================================
     private function toStr(mixed $v): string
     {
@@ -969,8 +952,22 @@ PROMPT;
         if (is_string($v)) return $v;
         if (is_int($v) || is_float($v)) return (string)$v;
         if (is_bool($v)) return $v ? '1' : '0';
-        $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        return is_string($j) ? $j : '';
+
+        if (is_array($v)) {
+            foreach (['text','content','value','html'] as $k) {
+                if (array_key_exists($k, $v)) return $this->toStr($v[$k]);
+            }
+            $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return is_string($j) ? $j : '';
+        }
+
+        if (is_object($v)) {
+            if ($v instanceof \Stringable) return (string)$v;
+            $j = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return is_string($j) ? $j : '';
+        }
+
+        return '';
     }
 
     private function shortKw(): string
