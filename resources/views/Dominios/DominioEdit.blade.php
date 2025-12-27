@@ -67,6 +67,7 @@
                                 @php
                                 // Opciones: puedes moverlo a config/elementor.php si quieres.
                                $plantillas = [
+                                'elementor/elementor-10.json' => 'Plantilla modificada mia ',
                                 'elementor/elementor-64-pretty.json' => 'Plantilla 64 (tokens bonitos)',
                                 'elementor/elementor-65-pretty.json' => 'Plantilla 65 (tokens bonitos)',
                                 'elementor/elementor-66.json' => 'Plantilla 66 (tokens bonitos)',
