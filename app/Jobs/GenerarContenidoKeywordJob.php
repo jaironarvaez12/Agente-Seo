@@ -30,6 +30,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         public string $tipo,
         public string $keyword
     ) {
+        // ✅ UUID real por ejecución (nuevo job = nuevo registro)
         $this->jobUuid = (string) Str::uuid();
     }
 
@@ -38,6 +39,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         $registro = null;
 
         try {
+            // 1) Registro por job_uuid (retries del MISMO job)
             $registro = $this->getOrCreateRegistro();
             $this->registroId = (int) $registro->id_dominio_contenido_detalle;
 
@@ -51,17 +53,21 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 'error'   => null,
             ]);
 
+            // 2) Config IA
             $apiKey = (string) env('DEEPSEEK_API_KEY', '');
             $model  = (string) env('DEEPSEEK_MODEL', 'deepseek-chat');
             if ($apiKey === '') throw new \RuntimeException('NO_RETRY: DEEPSEEK_API_KEY no configurado');
 
+            // 3) Cargar plantilla
             [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
 
+            // 4) Tokens meta (descubre tokens en editor/text/title)
             $tokensMeta = $this->collectTokensMeta($tpl);
             if (empty($tokensMeta)) {
                 throw new \RuntimeException("NO_RETRY: La plantilla no contiene tokens {{TOKEN}}. Template: {$tplPath}");
             }
 
+            // 5) Historial anti-repetición
             $prev = Dominios_Contenido_DetallesModel::where('id_dominio_contenido', (int)$this->idDominioContenido)
                 ->whereNotNull('draft_html')
                 ->orderByDesc('id_dominio_contenido_detalle')
@@ -78,6 +84,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             $noRepetirCorpus = $this->compactHistory($usedCorpus, 2500);
             $lastCorpus = trim((string)($usedCorpus[0] ?? ''));
 
+            // 6) Generación (2 ciclos si se parece demasiado)
             $finalValues = null;
 
             for ($cycle = 1; $cycle <= 2; $cycle++) {
@@ -96,21 +103,30 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                     noRepetirCorpus: $noRepetirCorpus
                 );
 
+                // ✅ BLINDAJE: convierte TODO a string
                 $values = $this->stringifyValues($values);
 
-                // ✅ fuerza diversidad y evita repetidos exactos en tokens clave
-                $this->ensureDistinctKeyTokens($values, $seed);
+                // ✅ REFINE: si algunos tokens clave salen “plantilla”, re-generarlos por IA (NO hardcode)
+                $values = $this->aiRefineKeyTokensIfGeneric(
+                    apiKey: $apiKey,
+                    model: $model,
+                    values: $values,
+                    seed: $seed,
+                    noRepetirTitles: $noRepetirTitles,
+                    noRepetirCorpus: $noRepetirCorpus
+                );
 
                 $currentText = $this->valuesToPlainText($values);
                 $sim = ($lastCorpus !== '') ? $this->jaccardBigrams($currentText, $lastCorpus) : 0.0;
 
                 $finalValues = $values;
+
                 if ($sim < 0.45) break;
             }
 
             if (!is_array($finalValues)) throw new \RuntimeException('No se pudo generar valores finales');
 
-            // ✅ reemplazo robusto: token name normalizado (mata ZWSP/FEFF/etc)
+            // 7) Reemplazar tokens en la plantilla
             [$filled, $replacedCount, $remainingTokens] = $this->fillTemplateTokensWithStats($tpl, $finalValues);
 
             if ($replacedCount < 1) {
@@ -120,12 +136,14 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remainingTokens, 0, 80)));
             }
 
+            // 8) Title + slug
             $title = trim(strip_tags($this->toStr($finalValues['HERO_H1'] ?? $finalValues['SEO_TITLE'] ?? $this->keyword)));
             if ($title === '') $title = $this->keyword;
 
             $slugBase = Str::slug($title ?: $this->keyword);
             $slug = $slugBase . '-' . $registro->id_dominio_contenido_detalle;
 
+            // 9) Guardar
             $registro->update([
                 'title'          => $title,
                 'slug'           => $slug,
@@ -178,6 +196,8 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
         $templateRel = trim((string)($dominio->elementor_template_path ?? ''));
         if ($templateRel === '') $templateRel = trim((string)env('ELEMENTOR_TEMPLATE_PATH', ''));
+
+        // ✅ estándar
         if ($templateRel === '') $templateRel = 'elementor/elementor-179-2025-12-27.json';
 
         $templateRel = str_replace(['https:', 'http:'], '', $templateRel);
@@ -204,17 +224,6 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         return [$tpl, $templatePath];
     }
 
-    // ========================= TOKEN KEY NORMALIZER =========================
-    private function normalizeTokenKey(string $k): string
-    {
-        // Quita invisibles y cualquier char raro, deja solo A-Z0-9_
-        $k = strtoupper($k);
-        $k = preg_replace('~[\x{200B}\x{200C}\x{200D}\x{FEFF}]~u', '', $k); // ZWSP/ZWNJ/ZWJ/BOM
-        $k = preg_replace('~\s+~u', '', $k);
-        $k = preg_replace('~[^A-Z0-9_]+~', '', $k);
-        return (string)$k;
-    }
-
     // ========================= TOKENS META =========================
     private function collectTokensMeta(array $tpl): array
     {
@@ -225,15 +234,13 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             foreach ($node as $k => $v) {
                 if (is_string($k) && in_array($k, ['editor','title','text'], true) && is_string($v) && str_contains($v, '{{')) {
-
-                    // ✅ permite tokens aunque tengan invisibles alrededor
-                    if (preg_match_all('/\{\{\s*([A-Z0-9_\x{200B}\x{FEFF}]+)\s*\}\}/u', $v, $m)) {
-                        foreach (($m[1] ?? []) as $tokRaw) {
-                            $tok = $this->normalizeTokenKey((string)$tokRaw);
+                    if (preg_match_all('/\{\{([A-Z0-9_]+)\}\}/', $v, $m)) {
+                        foreach (($m[1] ?? []) as $tok) {
+                            $tok = (string)$tok;
                             if ($tok === '') continue;
 
                             $type  = ($k === 'editor') ? 'editor' : 'plain';
-                            $wrapP = (bool) preg_match('~<p>\s*\{\{\s*' . preg_quote($tokRaw, '~') . '\s*\}\}\s*</p>~iu', $v);
+                            $wrapP = (bool) preg_match('~<p>\s*\{\{' . preg_quote($tok, '~') . '\}\}\s*</p>~i', $v);
 
                             if (!isset($meta[$tok])) {
                                 $meta[$tok] = ['type' => $type, 'wrap_p' => $wrapP];
@@ -351,8 +358,16 @@ REGLAS:
 - Keys editor: 1–3 frases. Permite SOLO <strong> y <br>. NO uses <p>.
 - Keys plain: solo texto plano (sin HTML).
 - SECTION_X_TITLE y SECTION_X_P deben seguir su tema del plan y ser DIFERENTES entre sí.
-- KIT_H1, PRICE_H2 y CLIENTS_LABEL deben ser distintos entre sí (no usar frases genéricas).
-- PROHIBIDO escribir: "no recomendado", "perfil no recomendado", "no es para ti", "no es ideal para".
+- No repitas la keyword en todas las líneas.
+- PROHIBIDO responder con frases plantilla genéricas:
+  "Contenido útil para X, listo para adaptar"
+  "Bloque preparado para X con enfoque claro"
+  "Texto ordenado para X sin relleno"
+  "Estrategias Adaptadas a Tu Mercado"
+  "Perfil no recomendado para este servicio"
+- CLIENTS_LABEL debe ser 1–2 palabras (label), NUNCA una frase.
+- KIT_H1 y PRICE_H2 deben ser títulos cortos (no frases).
+- TESTIMONIOS_TITLE: 3–6 palabras, sin clichés.
 
 LISTA editor:
 {$editorList}
@@ -386,7 +401,7 @@ PROMPT;
         // Anti repetición exacta en SECTION_P
         $seen = [];
         foreach ($values as $k => $v) {
-            if (!preg_match('~^SECTION_(\d+)_P$~', (string)$k)) continue;
+            if (!preg_match('~^SECTION_(\d+)_P$~', (string)$k, $m)) continue;
             $plain = mb_strtolower(trim(strip_tags($this->toStr($v))));
             if ($plain === '') continue;
 
@@ -397,100 +412,17 @@ PROMPT;
             }
         }
 
-        $this->ensureDistinctKeyTokens($values, $seed);
-
         return $values;
     }
 
     private function tokenRank(string $k): int
     {
-        if (in_array($k, ['KIT_H1','PRICE_H2','CLIENTS_LABEL','TESTIMONIOS_TITLE'], true)) return 5;
         if (preg_match('~^SECTION_\d+_TITLE$~', $k)) return 20;
         if (preg_match('~^SECTION_\d+_P$~', $k)) return 30;
         return 10;
     }
 
-    // ========================= FIX: distintos tokens clave =========================
-    private function ensureDistinctKeyTokens(array &$values, int $seed): void
-    {
-        $kw = $this->shortKw();
-
-        $variants = [
-            'KIT_H1' => [
-                "Bloques listos para {$kw}",
-                "Estructura lista para {$kw}",
-                "Kit de contenido para {$kw}",
-                "Secciones clave para {$kw}",
-                "Base de copy para {$kw}",
-            ],
-            'PRICE_H2' => [
-                "Plan y entregables",
-                "Alcance e inversión",
-                "Opciones y paquetes",
-                "Qué incluye el servicio",
-                "Entregables y plazos",
-            ],
-            'CLIENTS_LABEL' => [
-                "Marcas",
-                "Negocios",
-                "Equipos",
-                "Proyectos",
-                "Clientes",
-            ],
-            'TESTIMONIOS_TITLE' => [
-                "Lo que suelen valorar",
-                "Resultados y aprendizajes",
-                "Puntos fuertes del enfoque",
-                "Experiencias de clientes",
-                "Qué suele funcionar",
-            ],
-        ];
-
-        $keys = array_keys($variants);
-
-        // normaliza claves por si entraron raras
-        $normalized = [];
-        foreach ($values as $k => $v) {
-            $nk = $this->normalizeTokenKey((string)$k);
-            if ($nk === '') continue;
-            $normalized[$nk] = $this->toStr($v);
-        }
-        $values = $normalized;
-
-        $used = [];
-        foreach ($keys as $tok) {
-            if (!isset($values[$tok])) continue;
-
-            $val = trim($this->toStr($values[$tok]));
-            $norm = mb_strtolower($val);
-
-            $needFix = ($val === '' || isset($used[$norm]) || $this->looksLikeGenericBlock($val));
-            if (!$needFix) { $used[$norm] = true; continue; }
-
-            $list = $variants[$tok];
-            $start = $this->stableSeedInt($seed . '|' . $tok) % count($list);
-
-            $picked = null;
-            for ($i=0; $i<count($list); $i++) {
-                $cand = $list[($start + $i) % count($list)];
-                $candNorm = mb_strtolower(trim($cand));
-                if (!isset($used[$candNorm])) { $picked = $cand; break; }
-            }
-            if ($picked === null) $picked = $list[$start];
-
-            $values[$tok] = $picked;
-            $used[mb_strtolower(trim($picked))] = true;
-        }
-    }
-
-    private function looksLikeGenericBlock(string $s): bool
-    {
-        $t = mb_strtolower(trim(strip_tags($s)));
-        if ($t === '') return true;
-        return str_contains($t, 'bloque preparado') || str_contains($t, 'texto ordenado') || str_contains($t, 'sin relleno');
-    }
-
-    // ========================= THEME PLAN (sin negativos) =========================
+    // ========================= THEME PLAN =========================
     private function buildThemePlan(int $seed, int $poolSize = 40, int $sections = 26): array
     {
         $pool = [
@@ -510,7 +442,7 @@ PROMPT;
             "Contenido para escanear (UX)",
             "Casos/ejemplos de implementación",
             "Para quién es ideal",
-            // ❌ quitado: "Para quién NO es ideal"
+            "Para quién NO es ideal",
             "Métricas a observar",
             "Checklist de publicación",
             "Mantenimiento y iteración",
@@ -687,7 +619,7 @@ PROMPT;
 
         if (preg_match_all('~"([A-Z0-9_]+)"\s*:\s*"((?:\\\\.|[^"\\\\])*)"~u', $raw, $m, PREG_SET_ORDER)) {
             foreach ($m as $row) {
-                $k = $this->normalizeTokenKey((string)($row[1] ?? ''));
+                $k = (string)($row[1] ?? '');
                 if ($k === '') continue;
                 $inner = (string)($row[2] ?? '');
                 $decoded = json_decode('"' . $inner . '"', true);
@@ -704,8 +636,8 @@ PROMPT;
         $set = array_fill_keys($keys, true);
         $out = [];
         foreach ($arr as $k => $v) {
-            $k = $this->normalizeTokenKey((string)$k);
-            if ($k !== '' && isset($set[$k])) $out[$k] = $v;
+            $k = (string)$k;
+            if (isset($set[$k])) $out[$k] = $v;
         }
         return $out;
     }
@@ -761,16 +693,15 @@ PROMPT;
             return $arr[$i] ?? $arr[0];
         };
 
-        // ✅ fallbacks específicos (evita caer al genérico)
-        if ($tok === 'CLIENTS_LABEL') return $pick(["Marcas","Negocios","Equipos","Proyectos","Clientes"]);
-        if ($tok === 'KIT_H1') return $pick(["Bloques listos para {$kw}","Estructura lista para {$kw}","Kit de contenido para {$kw}","Secciones clave para {$kw}"]);
-        if ($tok === 'PRICE_H2') return $pick(["Plan y entregables","Alcance e inversión","Opciones y paquetes","Qué incluye el servicio","Entregables y plazos"]);
-        if ($tok === 'TESTIMONIOS_TITLE') return $pick(["Lo que suelen valorar","Resultados y aprendizajes","Puntos fuertes del enfoque","Experiencias de clientes","Qué suele funcionar"]);
-
         if (preg_match('~^SECTION_(\d+)_TITLE$~', $tok, $m)) {
             $i = (int)($m[1] ?? 1);
             $tema = $themePlan[$i] ?? "Tema {$i}";
-            $variants = ["Enfoque: {$tema}","{$tema} en la práctica","Cómo aplicamos: {$tema}","Puntos clave de: {$tema}"];
+            $variants = [
+                "Enfoque: {$tema}",
+                "{$tema} en la práctica",
+                "Cómo aplicamos: {$tema}",
+                "Puntos clave de: {$tema}",
+            ];
             $t = $pick($variants);
             return $forceUnique ? ($t . " ({$i})") : $t;
         }
@@ -794,72 +725,83 @@ PROMPT;
             return ($type === 'editor') ? $p : trim(strip_tags($p));
         }
 
+        if (str_starts_with($tok, 'BTN_')) {
+            return match ($tok) {
+                'BTN_PRESUPUESTO' => $pick(["Solicitar presupuesto","Pedir propuesta","Ver opciones"]),
+                'BTN_REUNION'     => $pick(["Agendar llamada","Reservar llamada","Hablar ahora"]),
+                'BTN_KITDIGITAL'  => $pick(["Ver información","Consultar","Empezar"]),
+                default           => $pick(["Ver opciones","Continuar"]),
+            };
+        }
+
+        if ($tok === 'HERO_H1') return $pick([
+            "{$kw} con estrategia y claridad",
+            "Estructura y copy para {$kw}",
+            "{$kw}: mensaje, secciones y CTA",
+        ]);
+
+        if ($tok === 'HERO_KICKER') return $pick([
+            "Para equipos que buscan claridad",
+            "Estructura lista para publicar",
+            "Mensaje directo, sin ruido",
+            "Pensado para leads y acción",
+        ]);
+
+        if ($tok === 'FAQ_TITLE') return "Preguntas frecuentes";
+
+        if ($tok === 'FINAL_CTA') {
+            $txt = $pick([
+                "¿Quieres publicarlo y avanzar? <strong>Te guiamos con el siguiente paso.</strong>",
+                "¿Listo para mejorar el mensaje? <strong>Hagamos una propuesta clara.</strong>",
+                "¿Buscas una entrega sin vueltas? <strong>Agenda y lo estructuramos.</strong>",
+            ]);
+            return ($type === 'editor' && !$wrapP) ? $txt : trim(strip_tags($txt));
+        }
+
         $generic = $pick([
             "Contenido útil para {$kw}, listo para adaptar.",
             "Bloque preparado para {$kw} con enfoque claro.",
             "Texto ordenado para {$kw} sin relleno.",
         ]);
-
         return ($type === 'editor' && !$wrapP) ? $generic : trim(strip_tags($generic));
     }
 
-    // ========================= REEMPLAZO TOKENS (robusto con invisibles) =========================
+    // ========================= REEMPLAZO TOKENS (blindado) =========================
     private function fillTemplateTokensWithStats(array $tpl, array $values): array
     {
-        // normaliza keys del values
-        $normValues = [];
+        $dict = [];
         foreach ($values as $k => $v) {
-            $nk = $this->normalizeTokenKey((string)$k);
-            if ($nk === '') continue;
-            $normValues[$nk] = $this->toStr($v);
+            $dict['{{' . (string)$k . '}}'] = $this->toStr($v);
         }
 
         $count = 0;
-        $this->replaceTokensDeepRegex($tpl, $normValues, $count);
-        $remaining = $this->collectRemainingTokensDeepRegex($tpl);
+        $this->replaceTokensDeep($tpl, $dict, $count);
+        $remaining = $this->collectRemainingTokensDeep($tpl);
 
         return [$tpl, $count, $remaining];
     }
 
-    private function replaceTokensDeepRegex(mixed &$node, array $values, int &$count): void
+    private function replaceTokensDeep(mixed &$node, array $dict, int &$count): void
     {
         if (is_array($node)) {
-            foreach ($node as &$v) $this->replaceTokensDeepRegex($v, $values, $count);
+            foreach ($node as &$v) $this->replaceTokensDeep($v, $dict, $count);
             return;
         }
         if (!is_string($node) || $node === '') return;
         if (!str_contains($node, '{{')) return;
 
         $orig = $node;
-
-        $node = preg_replace_callback(
-            '/\{\{\s*([A-Z0-9_\x{200B}\x{FEFF}]+)\s*\}\}/u',
-            function ($m) use ($values) {
-                $raw = (string)($m[1] ?? '');
-                $key = $this->normalizeTokenKey($raw);
-                if ($key !== '' && array_key_exists($key, $values)) {
-                    return (string)$values[$key];
-                }
-                return $m[0];
-            },
-            $node
-        );
-
+        $node = strtr($node, $dict);
         if ($node !== $orig) $count++;
     }
 
-    private function collectRemainingTokensDeepRegex(mixed $node): array
+    private function collectRemainingTokensDeep(mixed $node): array
     {
         $found = [];
         $walk = function ($n) use (&$walk, &$found) {
             if (is_array($n)) { foreach ($n as $v) $walk($v); return; }
             if (!is_string($n) || $n === '') return;
-            if (preg_match_all('/\{\{\s*([A-Z0-9_\x{200B}\x{FEFF}]+)\s*\}\}/u', $n, $m)) {
-                foreach (($m[1] ?? []) as $raw) {
-                    $k = $this->normalizeTokenKey((string)$raw);
-                    if ($k !== '') $found[] = '{{' . $k . '}}';
-                }
-            }
+            if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $n, $m)) foreach ($m[0] as $tok) $found[] = $tok;
         };
         $walk($node);
         $found = array_values(array_unique($found));
@@ -959,15 +901,11 @@ PROMPT;
     private function stringifyValues(array $values): array
     {
         $out = [];
-        foreach ($values as $k => $v) {
-            $nk = $this->normalizeTokenKey((string)$k);
-            if ($nk === '') continue;
-            $out[$nk] = $this->toStr($v);
-        }
+        foreach ($values as $k => $v) $out[(string)$k] = $this->toStr($v);
         return $out;
     }
 
-    // ========================= UTILS =========================
+    // ========================= UTILS (ANTI Array->string) =========================
     private function toStr(mixed $v): string
     {
         if ($v === null) return '';
@@ -997,5 +935,192 @@ PROMPT;
         $kw = trim((string)$this->keyword);
         if ($kw === '') return 'tu proyecto';
         return mb_substr($kw, 0, 70);
+    }
+
+    // ========================= IA REFINE (para tokens que salen “plantilla”) =========================
+    private function aiRefineKeyTokensIfGeneric(
+        string $apiKey,
+        string $model,
+        array $values,
+        int $seed,
+        string $noRepetirTitles,
+        string $noRepetirCorpus
+    ): array {
+        // tokens que te están dando guerra
+        $targets = ['KIT_H1','PRICE_H2','CLIENTS_LABEL','TESTIMONIOS_TITLE'];
+
+        $need = [];
+        foreach ($targets as $k) {
+            if (!array_key_exists($k, $values)) continue;
+            $v = $this->toStr($values[$k] ?? '');
+            if ($this->looksGenericTokenValue($v) || $this->isTooLongForKeyToken($k, $v)) {
+                $need[] = $k;
+            }
+        }
+        if (empty($need)) return $values;
+
+        // Pedimos 3 opciones por token y elegimos la mejor
+        $skeleton = [];
+        foreach ($need as $k) $skeleton[$k] = ["", "", ""];
+        $schema = json_encode($skeleton, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        $kw   = $this->shortKw();
+        $type = $this->tipo;
+
+        $already = [];
+        foreach ($values as $k => $v) {
+            $k = (string)$k;
+            if (in_array($k, $targets, true)) {
+                $already[] = $k . ': ' . trim(strip_tags($this->toStr($v)));
+            }
+        }
+        $alreadyStr = implode(" | ", array_slice(array_filter($already), 0, 20));
+
+        $variation = "seed={$seed}|job=" . substr($this->jobUuid, 0, 8) . "|rid=" . (int)$this->registroId . "|refine_keys";
+
+        $prompt = <<<PROMPT
+Devuelve SOLO JSON válido (sin markdown). RESPUESTA MINIFICADA.
+Idioma: ES.
+
+VARIATION (NO imprimir): {$variation}
+
+Contexto:
+- Keyword: {$kw}
+- Tipo: {$type}
+
+NO REPETIR TÍTULOS:
+{$noRepetirTitles}
+
+NO REPETIR TEXTOS:
+{$noRepetirCorpus}
+
+YA GENERADO (evita repetir o reciclar):
+{$alreadyStr}
+
+OBJETIVO:
+Genera opciones MUY DIFERENTES para estos tokens. Devuelve 3 opciones por token (array de 3 strings).
+
+REGLAS:
+- PROHIBIDO usar frases plantilla tipo:
+  "Contenido útil para X, listo para adaptar"
+  "Bloque preparado para X con enfoque claro"
+  "Texto ordenado para X sin relleno"
+  "Estrategias Adaptadas a Tu Mercado"
+  "Perfil no recomendado para este servicio"
+- Cada opción debe ser distinta (no variar solo 1 palabra).
+- KIT_H1: título corto (3–7 palabras). No frase larga.
+- PRICE_H2: título corto (2–6 palabras). No menciones precios concretos.
+- CLIENTS_LABEL: 1–2 palabras (label), NUNCA una frase.
+- TESTIMONIOS_TITLE: 3–6 palabras. Sin clichés.
+- No repitas la keyword literal en todas las opciones.
+
+Devuelve EXACTAMENTE las keys del ESQUEMA.
+
+ESQUEMA:
+{$schema}
+PROMPT;
+
+        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 900, temperature: 0.95, topP: 0.9, jsonMode: true);
+
+        $arr = [];
+        try {
+            $arr = $this->parseJsonStrict($raw);
+        } catch (\Throwable $e) {
+            return $values; // no rompemos nada
+        }
+
+        $usedNorm = [];
+
+        foreach ($need as $k) {
+            $cands = $arr[$k] ?? [];
+            if (!is_array($cands)) $cands = [];
+
+            $best = '';
+            foreach ($cands as $cand) {
+                $cand = $this->toStr($cand);
+                $cand = $this->cleanKeyTokenByType($k, $cand);
+
+                if ($cand === '') continue;
+                if ($this->looksGenericTokenValue($cand)) continue;
+                if ($this->isTooLongForKeyToken($k, $cand)) continue;
+
+                $norm = mb_strtolower(trim($cand));
+                if (isset($usedNorm[$norm])) continue;
+
+                $best = $cand;
+                break;
+            }
+
+            if ($best === '') {
+                $best = $this->cleanKeyTokenByType($k, $this->toStr($values[$k] ?? ''));
+            }
+
+            if ($best !== '') {
+                $values[$k] = $best;
+                $usedNorm[mb_strtolower(trim($best))] = true;
+            }
+        }
+
+        return $values;
+    }
+
+    private function looksGenericTokenValue(string $v): bool
+    {
+        $t = mb_strtolower(trim(strip_tags($v)));
+        if ($t === '') return true;
+
+        $banned = [
+            'contenido útil para',
+            'listo para adaptar',
+            'bloque preparado para',
+            'con enfoque claro',
+            'texto ordenado para',
+            'sin relleno',
+            'perfil no recomendado para este servicio',
+            'estrategias adaptadas a tu mercado',
+        ];
+
+        foreach ($banned as $b) {
+            if ($b !== '' && str_contains($t, $b)) return true;
+        }
+
+        // muy “plantilla” por estructura
+        if (preg_match('~^(contenido|bloque|texto)\s~u', $t)) return true;
+
+        return false;
+    }
+
+    private function isTooLongForKeyToken(string $key, string $v): bool
+    {
+        $plain = trim(preg_replace('~\s+~u', ' ', strip_tags($v)));
+        $words = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($words) ? count($words) : 0;
+
+        return match ($key) {
+            'CLIENTS_LABEL' => $wc > 2,
+            'PRICE_H2'      => $wc > 6,
+            'KIT_H1'        => $wc > 7,
+            'TESTIMONIOS_TITLE' => $wc > 6,
+            default         => $wc > 10,
+        };
+    }
+
+    private function cleanKeyTokenByType(string $key, string $v): string
+    {
+        $plain = trim(preg_replace('~\s+~u', ' ', strip_tags($v)));
+        $plain = rtrim($plain, " \t\n\r\0\x0B-–—|:;,. ");
+
+        if ($key === 'CLIENTS_LABEL') {
+            $words = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+            $plain = implode(' ', array_slice($words, 0, 2));
+        }
+
+        if ($key === 'PRICE_H2' || $key === 'KIT_H1' || $key === 'TESTIMONIOS_TITLE') {
+            $words = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+            $limit = ($key === 'PRICE_H2') ? 6 : (($key === 'KIT_H1') ? 7 : 6);
+            if (count($words) > $limit) $plain = implode(' ', array_slice($words, 0, $limit));
+        }
+
+        return trim($plain);
     }
 }
