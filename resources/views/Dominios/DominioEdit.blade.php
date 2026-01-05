@@ -73,7 +73,7 @@
                                    ========================= --}}
                                 @php
                                     $wpBase = 'https://testingseo.entornodedesarrollo.es';
-                                    $secret = env('TSEO_TPL_SECRET'); // mismo secret que el plugin TestingSEO Templates API
+                                    $secret = env('TSEO_TPL_SECRET'); // mismo secret que el plugin de testingseo
                                 @endphp
 
                                 <div class="mb-20">
@@ -92,7 +92,8 @@
                                                     $id = $tpl['id'] ?? null;
                                                     $title = $tpl['title'] ?? 'Sin título';
 
-                                                    // URL de preview (solo ver) usando el endpoint: ?tseo_preview=1&id=...&ts=...&sig=...
+                                                    // URL de preview (solo ver) usando:
+                                                    // https://testingseo.entornodedesarrollo.es/?tseo_preview=1&id=ID&ts=TS&sig=HMAC
                                                     $tsPreview = time();
                                                     $sigPreview = hash_hmac('sha256', $tsPreview.'.preview.'.$id, $secret);
                                                     $previewUrl = $wpBase.'/?tseo_preview=1&id='.$id.'&ts='.$tsPreview.'&sig='.$sigPreview;
@@ -100,28 +101,36 @@
 
                                                 <div class="col-md-6">
                                                     <div class="tpl-card border radius-12 overflow-hidden bg-white">
-                                                        <a href="{{ $previewUrl }}" target="_blank" class="d-block text-decoration-none">
-                                                            <div style="height:240px; background:#f6f7f9;">
-                                                                <iframe
-                                                                    src="{{ $previewUrl }}"
-                                                                    style="width:100%; height:240px; border:0;"
-                                                                    loading="lazy"
-                                                                    referrerpolicy="no-referrer-when-downgrade"
-                                                                ></iframe>
+                                                        <div style="height:240px; background:#f6f7f9;">
+                                                            <iframe
+                                                                src="{{ $previewUrl }}"
+                                                                style="width:100%; height:240px; border:0;"
+                                                                loading="lazy"
+                                                                sandbox="allow-same-origin allow-scripts"
+                                                                referrerpolicy="no-referrer-when-downgrade"
+                                                            ></iframe>
+                                                        </div>
+
+                                                        <div class="p-12 d-flex align-items-center justify-content-between gap-2">
+                                                            <div>
+                                                                <div class="fw-semibold text-dark">{{ $title }}</div>
+                                                                <small class="text-muted">ID: {{ $id }}</small>
                                                             </div>
 
-                                                            <div class="p-12">
-                                                                <div class="fw-semibold text-dark">{{ $title }}</div>
-                                                                <small class="text-muted">Ver plantilla • ID: {{ $id }}</small>
-                                                            </div>
-                                                        </a>
+                                                            <a href="{{ $previewUrl }}"
+                                                               target="_blank"
+                                                               rel="noopener noreferrer"
+                                                               class="btn btn-sm btn-primary">
+                                                                Ver
+                                                            </a>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             @endforeach
                                         </div>
 
                                         <small class="text-muted d-block mt-2">
-                                            Haz click en una tarjeta para abrir el preview en una nueva pestaña.
+                                            Usa el botón <strong>Ver</strong> para abrir el preview en una nueva pestaña.
                                         </small>
                                     @endif
                                 </div>
@@ -158,8 +167,6 @@
 <style>
   .tpl-card { transition: transform .08s ease, box-shadow .08s ease; }
   .tpl-card:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(16,24,40,.08); }
-  /* Para que el click vaya al <a> y no el iframe */
-  .tpl-card iframe { pointer-events: none; }
 </style>
 
 <script>
