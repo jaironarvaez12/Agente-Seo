@@ -71,8 +71,8 @@
                                    PLANTILLAS DESDE testingseo
                                    ========================= --}}
                                 @php
+                                  // opcional: guardar selección
                                   $selectedId = old('wp_template_id', $dominio->wp_template_id ?? '');
-                                  $selectedOpenUrl = old('wp_template_open_url', $dominio->wp_template_open_url ?? '');
                                 @endphp
 
                                 <div class="mb-20">
@@ -80,9 +80,8 @@
                                         Plantillas (testingseo.entornodedesarrollo.es)
                                     </label>
 
-                                    {{-- (Opcional) guardar selección --}}
+                                    {{-- Opcional: input hidden para guardar qué plantilla seleccionó --}}
                                     <input type="hidden" id="wp_template_id" name="wp_template_id" value="{{ $selectedId }}">
-                                    <input type="hidden" id="wp_template_open_url" name="wp_template_open_url" value="{{ $selectedOpenUrl }}">
 
                                     @if(empty($plantillas))
                                         <div class="alert alert-warning mb-0">
@@ -94,8 +93,7 @@
                                                 @php
                                                   $id = $tpl['id'] ?? null;
                                                   $title = $tpl['title'] ?? 'Sin título';
-                                                  $openUrl = $tpl['open_url'] ?? null;
-
+                                                  $openUrl = $tpl['open_url'] ?? '#';
                                                   $isSelected = (string)$selectedId === (string)$id;
                                                 @endphp
 
@@ -103,17 +101,14 @@
                                                     <div class="tpl-card border radius-12 p-12 {{ $isSelected ? 'tpl-selected' : '' }}"
                                                          role="button"
                                                          tabindex="0"
-                                                         data-id="{{ $id }}"
-                                                         data-open-url="{{ $openUrl }}">
+                                                         data-id="{{ $id }}">
                                                         <div class="fw-semibold">{{ $title }}</div>
                                                         <small class="text-muted">ID: {{ $id }}</small>
 
                                                         <div class="mt-2 d-flex gap-2">
-                                                            @if($openUrl)
-                                                                <a href="{{ $openUrl }}" target="_blank" class="btn btn-sm btn-primary">
-                                                                    Abrir en WordPress
-                                                                </a>
-                                                            @endif
+                                                            <a href="{{ $openUrl }}" target="_blank" class="btn btn-sm btn-primary">
+                                                                Abrir en WordPress
+                                                            </a>
 
                                                             <button type="button" class="btn btn-sm btn-outline-primary tpl-select-btn">
                                                                 Seleccionar
@@ -125,7 +120,8 @@
                                         </div>
 
                                         <small class="text-muted d-block mt-2">
-                                            Esto solo es para ver/abrir la plantilla en WordPress. (Laravel siempre consulta a testingseo).
+                                            Esto es solo para ver/abrir la plantilla en WordPress (Elementor).
+                                            “Seleccionar” es opcional si quieres guardar el ID.
                                         </small>
                                     @endif
                                 </div>
@@ -164,39 +160,54 @@
 </style>
 
 <script>
-  // Seleccionar plantilla (opcional: guardar en hidden)
+  // Selección opcional (guarda el ID en hidden)
   document.querySelectorAll('.tpl-card').forEach(card => {
-    const selectBtn = card.querySelector('.tpl-select-btn');
+    const btn = card.querySelector('.tpl-select-btn');
 
     const pick = () => {
       const id = card.dataset.id || '';
-      const openUrl = card.dataset.openUrl || '';
-
-      document.getElementById('wp_template_id').value = id;
-      document.getElementById('wp_template_open_url').value = openUrl;
+      const input = document.getElementById('wp_template_id');
+      if (input) input.value = id;
 
       document.querySelectorAll('.tpl-card').forEach(c => c.classList.remove('tpl-selected'));
       card.classList.add('tpl-selected');
     };
 
-    card.addEventListener('click', (e) => {
-      // si hizo click en el link "Abrir", no cambiamos selección
-      if (e.target.tagName.toLowerCase() === 'a') return;
-      pick();
-    });
-
-    selectBtn?.addEventListener('click', (e) => {
+    btn?.addEventListener('click', (e) => {
       e.preventDefault();
       pick();
     });
+
+    card.addEventListener('click', (e) => {
+      // si hizo click en el link “Abrir”, no cambiamos selección
+      if (e.target.tagName.toLowerCase() === 'a') return;
+      pick();
+    });
+  });
+
+  // Tu listener de imagen (queda igual)
+  document.getElementById('imagen')?.addEventListener('change', function (e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+    const imgTag = document.getElementById('avatar-img');
+    const link = document.querySelector('.popup-img');
+
+    if (imgTag) imgTag.src = url;
+    if (link) link.href = url;
+
+    const img = new Image();
+    img.onload = () => URL.revokeObjectURL(url);
+    img.src = url;
   });
 </script>
 
 <script src="{{ asset('assets/js/lib/magnifc-popup.min.js') }}"></script>
 <script>
-    $('.popup-img').magnificPopup({
-        type: 'image',
-        gallery: { enabled: true }
-    });
+  $('.popup-img').magnificPopup({
+      type: 'image',
+      gallery: { enabled: true }
+  });
 </script>
 @endsection

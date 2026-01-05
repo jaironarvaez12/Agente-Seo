@@ -106,7 +106,7 @@ class DominiosController extends Controller
             $plantillas = [];
         }
 
-        return view('dominios.edit', compact('dominio', 'plantillas'));
+        return view('Dominios.DominioEdit', compact('dominio', 'plantillas'));
     }
 
 
