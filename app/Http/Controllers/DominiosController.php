@@ -82,7 +82,7 @@ class DominiosController extends Controller
      */
    public function edit($id)
 {
-    $dominio = DominioModel::findOrFail($id);
+    $dominio = DominiSModel::findOrFail($id);
 
     $wpBase = 'https://testingseo.entornodedesarrollo.es';
     $secret = env('TSEO_TPL_SECRET');
