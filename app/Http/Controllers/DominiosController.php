@@ -81,33 +81,35 @@ class DominiosController extends Controller
      * Show the form for editing the specified resource.
      */
    public function edit($id)
-    {
-        $dominio = DominiosModel::findOrFail($id);
+{
+    $dominio = DominioModel::findOrFail($id);
 
-        // WP fijo (testingseo)
-        $wpBase = rtrim(config('services.testingseo.url', 'https://testingseo.entornodedesarrollo.es'), '/');
-        $secret = config('services.testingseo.secret', env('TSEO_TPL_SECRET'));
+    $wpBase = 'https://testingseo.entornodedesarrollo.es';
+    $secret = env('TSEO_TPL_SECRET');
 
-        $plantillas = [];
+    $plantillas = [];
 
-        try {
-            $ts  = time();
-            $sig = hash_hmac('sha256', $ts . '.templates', $secret);
+    try {
+        $ts  = time();
+        $sig = hash_hmac('sha256', $ts.'.templates', $secret);
 
-            $res = Http::timeout(15)->get($wpBase . '/tseo-templates', [
-                'ts'  => $ts,
+        $res = Http::withOptions(['verify' => false]) // quítalo si tu SSL está bien
+            ->timeout(15)
+            ->get($wpBase.'/', [
+                'tseo_templates' => 1,
+                'ts' => $ts,
                 'sig' => $sig,
             ]);
 
-            if ($res->ok() && $res->json('ok') === true) {
-                $plantillas = $res->json('items') ?? [];
-            }
-        } catch (\Throwable $e) {
-            $plantillas = [];
+        if ($res->ok() && ($res->json('ok') === true)) {
+            $plantillas = $res->json('items') ?? [];
         }
-
-        return view('Dominios.DominioEdit', compact('dominio', 'plantillas'));
+    } catch (\Throwable $e) {
+        $plantillas = [];
     }
+
+    return view('Dominios.DominioEdit', compact('dominio', 'plantillas'));
+}
 
 
     /**
