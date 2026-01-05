@@ -39,7 +39,7 @@
                                         Nombre del Dominio<span class="text-danger-600">*</span>
                                     </label>
                                     <input type="text" class="form-control radius-8" id="nombre" name="nombre"
-                                           value=" {{ old('name', $dominio->nombre ?? '') }}"
+                                           value="{{ old('name', $dominio->nombre ?? '') }}"
                                            placeholder="Ej: IdeiWeb.com" readonly>
                                 </div>
 
@@ -56,7 +56,7 @@
                                         Usuario<span class="text-danger-600">*</span>
                                     </label>
                                     <input type="text" class="form-control radius-8" id="usuario" name="usuario"
-                                           value=" {{ old('usuario', $dominio->usuario ?? '') }}">
+                                           value="{{ old('usuario', $dominio->usuario ?? '') }}">
                                 </div>
 
                                 <div class="mb-20">
@@ -67,25 +67,31 @@
                                            placeholder="Ingrese su contraseña ">
                                 </div>
 
-                                {{-- =========================
-                                   PLANTILLAS (solo imagen + botón ver)
-                                   ========================= --}}
+                                {{-- ============================================
+                                   PLANTILLAS (WP) -> Guarda elementor_template_path
+                                   ============================================ --}}
                                 @php
                                     $wpBase = 'https://testingseo.entornodedesarrollo.es';
                                     $secret = env('TSEO_TPL_SECRET');
 
-                                    // Si luego quieres guardar selección, descomenta el hidden
-                                    // $selectedTplId = old('wp_template_id', $dominio->wp_template_id ?? '');
+                                    // ✅ TU MAPA (ID WP -> PATH JSON en Laravel)
+                                    // Cambia esto cuando quieras
+                                    $wpIdToJsonPath = [
+                                        // 196 => 'elementor/elementor-10.json',
+                                        // 179 => 'elementor/elementor-64-pretty.json',
+                                        // 170 => 'elementor/elementor-65-pretty.json',
+                                    ];
+
+                                    $selectedPath = old('elementor_template_path', $dominio->elementor_template_path ?? '');
                                 @endphp
 
                                 <div class="mb-20">
                                     <label class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Plantillas (testingseo)
+                                        Plantilla Elementor
                                     </label>
 
-                                    {{-- Opcional si quieres guardar el ID seleccionado (requiere campo en DB)
-                                    <input type="hidden" id="wp_template_id" name="wp_template_id" value="{{ $selectedTplId }}">
-                                    --}}
+                                    {{-- Este es el que se guarda en DB --}}
+                                    <input type="hidden" id="elementor_template_path" name="elementor_template_path" value="{{ $selectedPath }}">
 
                                     @if(empty($plantillas))
                                         <div class="alert alert-warning mb-0">
@@ -98,42 +104,50 @@
                                                     $id = $tpl['id'] ?? null;
                                                     $title = $tpl['title'] ?? 'Sin título';
 
-                                                    // Preview real (solo cuando den click en VER)
+                                                    // Preview real (solo al dar "Ver")
                                                     $ts = time();
                                                     $sig = hash_hmac('sha256', $ts.'.preview.'.$id, $secret);
                                                     $previewUrl = $wpBase.'/?tseo_preview=1&id='.$id.'&ts='.$ts.'&sig='.$sig;
+
+                                                    // Path que se va a guardar en elementor_template_path
+                                                    $jsonPath = $wpIdToJsonPath[$id] ?? '';
+                                                    $isSelected = ($jsonPath !== '' && $selectedPath === $jsonPath);
                                                 @endphp
 
                                                 <div class="col-md-6">
-                                                    <div class="tpl-card border radius-12 overflow-hidden bg-white">
-                                                        {{-- Miniatura genérica (sin iframe) --}}
-                                                        <div class="tpl-thumb d-flex align-items-center justify-content-center"
+                                                    <div class="tpl-card border radius-12 overflow-hidden bg-white {{ $isSelected ? 'tpl-selected' : '' }}">
+                                                        {{-- Miniatura genérica (solo imagen visual) --}}
+                                                        <div class="d-flex align-items-center justify-content-center"
                                                              style="height:180px; background:#f6f7f9;">
                                                             <div class="text-center px-3">
                                                                 <div class="fw-semibold text-dark">{{ $title }}</div>
-                                                                <small class="text-muted">ID: {{ $id }}</small>
+                                                                <small class="text-muted">WP ID: {{ $id }}</small>
+                                                                @if($jsonPath)
+                                                                    <div class="mt-1">
+                                                                        <small class="text-muted">Guardará: {{ $jsonPath }}</small>
+                                                                    </div>
+                                                                @else
+                                                                    <div class="mt-1">
+                                                                        <small class="text-warning">Sin mapeo a JSON</small>
+                                                                    </div>
+                                                                @endif
                                                             </div>
                                                         </div>
 
                                                         <div class="p-12 d-flex align-items-center justify-content-between gap-2">
-                                                            <small class="text-muted">
-                                                                Vista previa (imagen)
-                                                            </small>
+                                                            <a href="{{ $previewUrl }}"
+                                                               target="_blank"
+                                                               rel="noopener noreferrer"
+                                                               class="btn btn-sm btn-primary">
+                                                                Ver
+                                                            </a>
 
-                                                            <div class="d-flex gap-2">
-                                                                <a href="{{ $previewUrl }}"
-                                                                   target="_blank"
-                                                                   rel="noopener noreferrer"
-                                                                   class="btn btn-sm btn-primary">
-                                                                    Ver
-                                                                </a>
-
-                                                                {{-- Opcional: seleccionar para guardar ID
-                                                                <button type="button" class="btn btn-sm btn-outline-primary tpl-select-btn" data-id="{{ $id }}">
-                                                                    Seleccionar
-                                                                </button>
-                                                                --}}
-                                                            </div>
+                                                            <button type="button"
+                                                                    class="btn btn-sm btn-outline-primary tpl-select-btn"
+                                                                    data-path="{{ $jsonPath }}"
+                                                                    {{ $jsonPath === '' ? 'disabled' : '' }}>
+                                                                Seleccionar
+                                                            </button>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -141,7 +155,8 @@
                                         </div>
 
                                         <small class="text-muted d-block mt-2">
-                                            Pulsa <strong>Ver</strong> para abrir la plantilla completa (solo vista) en una nueva pestaña.
+                                            - <strong>Ver</strong> abre la plantilla completa (solo vista) en WordPress.<br>
+                                            - <strong>Seleccionar</strong> guardará el valor en <code>elementor_template_path</code> (cuando exista mapeo).
                                         </small>
                                     @endif
                                 </div>
@@ -173,7 +188,26 @@
 <script type="text/javascript" src="{{ asset('assets\js\Articulos.js') }}"></script>
 <script src="{{ asset('assets/js/lib/file-upload.js') }}"></script>
 
+<style>
+  .tpl-selected { border:2px solid #3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,.15); }
+</style>
+
 <script>
+  // Guardar el JSON path seleccionado en elementor_template_path
+  document.querySelectorAll('.tpl-select-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const path = btn.dataset.path || '';
+      if (!path) return;
+
+      const input = document.getElementById('elementor_template_path');
+      if (input) input.value = path;
+
+      document.querySelectorAll('.tpl-card').forEach(c => c.classList.remove('tpl-selected'));
+      btn.closest('.tpl-card')?.classList.add('tpl-selected');
+    });
+  });
+
+  // Tu listener de imagen (queda igual)
   document.getElementById('imagen')?.addEventListener('change', function (e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
@@ -203,17 +237,4 @@
         gallery: { enabled: true }
     });
 </script>
-
-{{-- Opcional: si activas "Seleccionar" arriba, descomenta esto también
-<script>
-  document.querySelectorAll('.tpl-select-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.id || '';
-      const input = document.getElementById('wp_template_id');
-      if (input) input.value = id;
-      alert('Plantilla seleccionada: ' + id);
-    });
-  });
-</script>
---}}
 @endsection
