@@ -80,12 +80,35 @@ class DominiosController extends Controller
     /**
      * Show the form for editing the specified resource.
      */
-    public function edit(string $IdDominio)
+   public function edit($id)
     {
-       $dominio = DominiosModel::find($IdDominio);
-       
-       return view('Dominios.DominioEdit',compact('dominio'));
+        $dominio = DominiosModel::findOrFail($id);
+
+        // WP fijo (testingseo)
+        $wpBase = rtrim(config('services.testingseo.url', 'https://testingseo.entornodedesarrollo.es'), '/');
+        $secret = config('services.testingseo.secret', env('TSEO_TPL_SECRET'));
+
+        $plantillas = [];
+
+        try {
+            $ts  = time();
+            $sig = hash_hmac('sha256', $ts . '.templates', $secret);
+
+            $res = Http::timeout(15)->get($wpBase . '/tseo-templates', [
+                'ts'  => $ts,
+                'sig' => $sig,
+            ]);
+
+            if ($res->ok() && $res->json('ok') === true) {
+                $plantillas = $res->json('items') ?? [];
+            }
+        } catch (\Throwable $e) {
+            $plantillas = [];
+        }
+
+        return view('dominios.edit', compact('dominio', 'plantillas'));
     }
+
 
     /**
      * Update the specified resource in storage.

@@ -43,5 +43,8 @@ return [
 'wp_webhook' => [
     'secret' => env('WP_WEBHOOK_SECRET'),
 ],
-
+'testingseo' => [
+    'url' => env('TESTINGSEO_WP_URL', 'https://testingseo.entornodedesarrollo.es'),
+    'secret' => env('TSEO_TPL_SECRET'),
+],
 ];
