@@ -68,20 +68,18 @@
                                 </div>
 
                                 {{-- =========================
-                                   PLANTILLAS DESDE testingseo
+                                   PLANTILLAS: SOLO VER CÓMO LUCEN
+                                   (Preview renderizado por WP/Elementor)
                                    ========================= --}}
                                 @php
-                                  // opcional: guardar selección
-                                  $selectedId = old('wp_template_id', $dominio->wp_template_id ?? '');
+                                    $wpBase = 'https://testingseo.entornodedesarrollo.es';
+                                    $secret = env('TSEO_TPL_SECRET'); // mismo secret que el plugin TestingSEO Templates API
                                 @endphp
 
                                 <div class="mb-20">
                                     <label class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Plantillas (testingseo.entornodedesarrollo.es)
+                                        Plantillas (preview)
                                     </label>
-
-                                    {{-- Opcional: input hidden para guardar qué plantilla seleccionó --}}
-                                    <input type="hidden" id="wp_template_id" name="wp_template_id" value="{{ $selectedId }}">
 
                                     @if(empty($plantillas))
                                         <div class="alert alert-warning mb-0">
@@ -91,37 +89,39 @@
                                         <div class="row g-3">
                                             @foreach($plantillas as $tpl)
                                                 @php
-                                                  $id = $tpl['id'] ?? null;
-                                                  $title = $tpl['title'] ?? 'Sin título';
-                                                  $openUrl = $tpl['open_url'] ?? '#';
-                                                  $isSelected = (string)$selectedId === (string)$id;
+                                                    $id = $tpl['id'] ?? null;
+                                                    $title = $tpl['title'] ?? 'Sin título';
+
+                                                    // URL de preview (solo ver) usando el endpoint: ?tseo_preview=1&id=...&ts=...&sig=...
+                                                    $tsPreview = time();
+                                                    $sigPreview = hash_hmac('sha256', $tsPreview.'.preview.'.$id, $secret);
+                                                    $previewUrl = $wpBase.'/?tseo_preview=1&id='.$id.'&ts='.$tsPreview.'&sig='.$sigPreview;
                                                 @endphp
 
                                                 <div class="col-md-6">
-                                                    <div class="tpl-card border radius-12 p-12 {{ $isSelected ? 'tpl-selected' : '' }}"
-                                                         role="button"
-                                                         tabindex="0"
-                                                         data-id="{{ $id }}">
-                                                        <div class="fw-semibold">{{ $title }}</div>
-                                                        <small class="text-muted">ID: {{ $id }}</small>
+                                                    <div class="tpl-card border radius-12 overflow-hidden bg-white">
+                                                        <a href="{{ $previewUrl }}" target="_blank" class="d-block text-decoration-none">
+                                                            <div style="height:240px; background:#f6f7f9;">
+                                                                <iframe
+                                                                    src="{{ $previewUrl }}"
+                                                                    style="width:100%; height:240px; border:0;"
+                                                                    loading="lazy"
+                                                                    referrerpolicy="no-referrer-when-downgrade"
+                                                                ></iframe>
+                                                            </div>
 
-                                                        <div class="mt-2 d-flex gap-2">
-                                                            <a href="{{ $openUrl }}" target="_blank" class="btn btn-sm btn-primary">
-                                                                Abrir en WordPress
-                                                            </a>
-
-                                                            <button type="button" class="btn btn-sm btn-outline-primary tpl-select-btn">
-                                                                Seleccionar
-                                                            </button>
-                                                        </div>
+                                                            <div class="p-12">
+                                                                <div class="fw-semibold text-dark">{{ $title }}</div>
+                                                                <small class="text-muted">Ver plantilla • ID: {{ $id }}</small>
+                                                            </div>
+                                                        </a>
                                                     </div>
                                                 </div>
                                             @endforeach
                                         </div>
 
                                         <small class="text-muted d-block mt-2">
-                                            Esto es solo para ver/abrir la plantilla en WordPress (Elementor).
-                                            “Seleccionar” es opcional si quieres guardar el ID.
+                                            Haz click en una tarjeta para abrir el preview en una nueva pestaña.
                                         </small>
                                     @endif
                                 </div>
@@ -138,6 +138,7 @@
                                         Guardar
                                     </button>
                                 </div>
+
                             </form>
 
                         </div>
@@ -155,36 +156,13 @@
 <script src="{{ asset('assets/js/lib/file-upload.js') }}"></script>
 
 <style>
-  .tpl-card { background:#fff; cursor:pointer; }
-  .tpl-selected { border:2px solid #3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,.15); }
+  .tpl-card { transition: transform .08s ease, box-shadow .08s ease; }
+  .tpl-card:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(16,24,40,.08); }
+  /* Para que el click vaya al <a> y no el iframe */
+  .tpl-card iframe { pointer-events: none; }
 </style>
 
 <script>
-  // Selección opcional (guarda el ID en hidden)
-  document.querySelectorAll('.tpl-card').forEach(card => {
-    const btn = card.querySelector('.tpl-select-btn');
-
-    const pick = () => {
-      const id = card.dataset.id || '';
-      const input = document.getElementById('wp_template_id');
-      if (input) input.value = id;
-
-      document.querySelectorAll('.tpl-card').forEach(c => c.classList.remove('tpl-selected'));
-      card.classList.add('tpl-selected');
-    };
-
-    btn?.addEventListener('click', (e) => {
-      e.preventDefault();
-      pick();
-    });
-
-    card.addEventListener('click', (e) => {
-      // si hizo click en el link “Abrir”, no cambiamos selección
-      if (e.target.tagName.toLowerCase() === 'a') return;
-      pick();
-    });
-  });
-
   // Tu listener de imagen (queda igual)
   document.getElementById('imagen')?.addEventListener('change', function (e) {
     const file = e.target.files && e.target.files[0];
