@@ -133,14 +133,7 @@
                 </td>
                 <td class="text-center">
                   <div class="d-flex align-items-center gap-10 justify-content-center">
-                    <button type="button"
-                      class="bg-info-focus text-info-600 bg-hover-info-200 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle border-0 btn-view-html"
-                      title="Ver HTML"
-                      data-title="{{ e($it->title ?: '(Sin título)') }}"
-                      data-html="{{ e($it->contenido_html) }}"
-                      data-error="{{ e($it->error ?? '') }}">
-                      <iconify-icon icon="majesticons:eye-line" class="menu-icon"></iconify-icon>
-                    </button>
+            
 
                     {{-- Publicar --}}
                     <form method="POST"
