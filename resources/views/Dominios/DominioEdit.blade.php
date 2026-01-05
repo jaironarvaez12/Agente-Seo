@@ -26,7 +26,7 @@
     <div class="card h-100 p-0 radius-12">
         <div class="card-body p-24">
             <div class="row justify-content-center">
-                <div class="col-xxl-6 col-xl-8 col-lg-10">
+                <div class="col-xxl-8 col-xl-10 col-lg-12">
                     <div class="card border">
                         <div class="card-body">
 
@@ -34,93 +34,64 @@
                                 @csrf
                                 @method('put')
 
+                                {{-- =====================
+                                   DATOS DEL DOMINIO
+                                   ===================== --}}
                                 <div class="mb-20">
-                                    <label for="nombre" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Nombre del Dominio<span class="text-danger-600">*</span>
-                                    </label>
-                                    <input type="text" class="form-control radius-8" id="nombre" name="nombre"
-                                           value="{{ old('name', $dominio->nombre ?? '') }}"
-                                           placeholder="Ej: IdeiWeb.com" readonly>
+                                    <label class="form-label fw-semibold text-sm mb-8">Dominio</label>
+                                    <input type="text" class="form-control radius-8"
+                                           value="{{ $dominio->nombre }}" readonly>
                                 </div>
 
-                                <div class="mb-20">
-                                    <label for="url" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Url
-                                    </label>
-                                    <textarea class="form-control radius-8" id="url" name="url" readonly
-                                              rows="2" placeholder="https://ideiweb.com/">{{ old('url', $dominio->url ?? '') }}</textarea>
-                                </div>
-
-                                <div class="mb-20">
-                                    <label for="usuario" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Usuario<span class="text-danger-600">*</span>
-                                    </label>
-                                    <input type="text" class="form-control radius-8" id="usuario" name="usuario"
-                                           value="{{ old('usuario', $dominio->usuario ?? '') }}">
-                                </div>
-
-                                <div class="mb-20">
-                                    <label for="password" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Contraseña<span class="text-danger-600">*</span>
-                                    </label>
-                                    <input type="password" class="form-control radius-8" id="password" name="password"
-                                           placeholder="Ingrese su contraseña">
-                                </div>
-
-                                {{-- =========================
-                                   PLANTILLAS: SOLO VER CÓMO LUCEN
-                                   (Preview renderizado por WP/Elementor)
-                                   ========================= --}}
+                                {{-- =====================
+                                   PLANTILLAS (IMAGEN)
+                                   ===================== --}}
                                 @php
                                     $wpBase = 'https://testingseo.entornodedesarrollo.es';
-                                    $secret = env('TSEO_TPL_SECRET'); // mismo secret que el plugin de testingseo
+                                    $secret = env('TSEO_TPL_SECRET');
                                 @endphp
 
                                 <div class="mb-20">
-                                    <label class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Plantillas (preview)
+                                    <label class="form-label fw-semibold text-sm mb-8">
+                                        Plantillas disponibles
                                     </label>
 
                                     @if(empty($plantillas))
-                                        <div class="alert alert-warning mb-0">
+                                        <div class="alert alert-warning">
                                             No se pudieron cargar las plantillas desde WordPress.
                                         </div>
                                     @else
-                                        <div class="row g-3">
+                                        <div class="row g-4">
                                             @foreach($plantillas as $tpl)
                                                 @php
-                                                    $id = $tpl['id'] ?? null;
-                                                    $title = $tpl['title'] ?? 'Sin título';
+                                                    $id = $tpl['id'];
+                                                    $title = $tpl['title'];
 
-                                                    // URL de preview (solo ver) usando:
-                                                    // https://testingseo.entornodedesarrollo.es/?tseo_preview=1&id=ID&ts=TS&sig=HMAC
-                                                    $tsPreview = time();
-                                                    $sigPreview = hash_hmac('sha256', $tsPreview.'.preview.'.$id, $secret);
-                                                    $previewUrl = $wpBase.'/?tseo_preview=1&id='.$id.'&ts='.$tsPreview.'&sig='.$sigPreview;
+                                                    // URL PREVIEW (solo cuando den click)
+                                                    $ts = time();
+                                                    $sig = hash_hmac('sha256', $ts.'.preview.'.$id, $secret);
+                                                    $previewUrl = $wpBase.'/?tseo_preview=1&id='.$id.'&ts='.$ts.'&sig='.$sig;
                                                 @endphp
 
-                                                <div class="col-md-6">
-                                                    <div class="tpl-card border radius-12 overflow-hidden bg-white">
-                                                        <div style="height:240px; background:#f6f7f9;">
-                                                            <iframe
-                                                                src="{{ $previewUrl }}"
-                                                                style="width:100%; height:240px; border:0;"
-                                                                loading="lazy"
-                                                                sandbox="allow-same-origin allow-scripts"
-                                                                referrerpolicy="no-referrer-when-downgrade"
-                                                            ></iframe>
+                                                <div class="col-md-4 col-lg-3">
+                                                    <div class="card h-100 radius-12 overflow-hidden">
+                                                        {{-- IMAGEN ESTÁTICA --}}
+                                                        <div style="height:180px;background:#f3f4f6;
+                                                            display:flex;align-items:center;justify-content:center;">
+                                                            <span class="text-muted text-sm">
+                                                                Vista previa
+                                                            </span>
                                                         </div>
 
-                                                        <div class="p-12 d-flex align-items-center justify-content-between gap-2">
-                                                            <div>
-                                                                <div class="fw-semibold text-dark">{{ $title }}</div>
-                                                                <small class="text-muted">ID: {{ $id }}</small>
+                                                        <div class="p-12">
+                                                            <div class="fw-semibold text-sm mb-2">
+                                                                {{ $title }}
                                                             </div>
 
                                                             <a href="{{ $previewUrl }}"
                                                                target="_blank"
                                                                rel="noopener noreferrer"
-                                                               class="btn btn-sm btn-primary">
+                                                               class="btn btn-sm btn-primary w-100">
                                                                 Ver
                                                             </a>
                                                         </div>
@@ -129,21 +100,24 @@
                                             @endforeach
                                         </div>
 
-                                        <small class="text-muted d-block mt-2">
-                                            Usa el botón <strong>Ver</strong> para abrir el preview en una nueva pestaña.
+                                        <small class="text-muted d-block mt-3">
+                                            Pulsa <strong>Ver</strong> para abrir la plantilla completa en una nueva pestaña.
                                         </small>
                                     @endif
                                 </div>
 
-                                <div class="d-flex align-items-center justify-content-center gap-3 mt-4">
+                                {{-- =====================
+                                   BOTONES
+                                   ===================== --}}
+                                <div class="d-flex justify-content-center gap-3 mt-4">
                                     <button type="button"
                                             onclick="window.location.href='{{ route('inicio') }}'"
-                                            class="border border-danger-600 bg-hover-danger-200 text-danger-600 text-md px-56 py-11 radius-8">
+                                            class="btn btn-outline-danger px-5">
                                         Cancelar
                                     </button>
 
                                     <button type="submit"
-                                            class="btn btn-primary border border-primary-600 text-md px-56 py-12 radius-8">
+                                            class="btn btn-primary px-5">
                                         Guardar
                                     </button>
                                 </div>
@@ -158,41 +132,4 @@
     </div>
 
 </div>
-@endsection
-
-@section('scripts')
-<script type="text/javascript" src="{{ asset('assets\\js\\Articulos.js') }}"></script>
-<script src="{{ asset('assets/js/lib/file-upload.js') }}"></script>
-
-<style>
-  .tpl-card { transition: transform .08s ease, box-shadow .08s ease; }
-  .tpl-card:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(16,24,40,.08); }
-</style>
-
-<script>
-  // Tu listener de imagen (queda igual)
-  document.getElementById('imagen')?.addEventListener('change', function (e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-
-    const url = URL.createObjectURL(file);
-    const imgTag = document.getElementById('avatar-img');
-    const link = document.querySelector('.popup-img');
-
-    if (imgTag) imgTag.src = url;
-    if (link) link.href = url;
-
-    const img = new Image();
-    img.onload = () => URL.revokeObjectURL(url);
-    img.src = url;
-  });
-</script>
-
-<script src="{{ asset('assets/js/lib/magnifc-popup.min.js') }}"></script>
-<script>
-  $('.popup-img').magnificPopup({
-      type: 'image',
-      gallery: { enabled: true }
-  });
-</script>
 @endsection
