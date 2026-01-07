@@ -79,8 +79,8 @@
                                     $wpIdToJsonPath = [
                                         // 196 => 'elementor/elementor-10.json',
                                          179 => 'elementor/elementor-10-pretty.json',
-                                        // 170 => 'elementor/elementor-65-pretty.json',
-                                    ];
+                                         130 => 'elementor/elementor-idei.json',
+                                    ]; 
 
                                     $selectedPath = old('elementor_template_path', $dominio->elementor_template_path ?? '');
                                 @endphp
