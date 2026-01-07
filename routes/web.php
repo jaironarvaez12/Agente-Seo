@@ -28,6 +28,7 @@ Route::group(['middleware' => 'auth'], function(){
 
 
 
+Route::post('/wp/webhook', [App\Http\Controllers\WordpressWebhookController::class, 'handle']);
 
 
 Route::post('dominios/{dominio}/contenido/{detalle}/publicar', [App\Http\Controllers\DominiosController::class, 'publicar'])
