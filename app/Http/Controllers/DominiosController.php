@@ -212,101 +212,84 @@ public function verWp($id, WordpressService $wp)
 {
     $dominio = DominiosModel::findOrFail($id);
 
-    // ========= 1) Normaliza URL para que el cache key sea estable =========
-    $siteRaw = trim((string) $dominio->url);
-    $siteRaw = rtrim($siteRaw, '/');
+    // ✅ 1) intenta usar el site_key real que manda WP (guardado en BD)
+    $siteKey = (string)($dominio->wp_site_key ?? '');
 
-    // Asegura esquema para parse_url (si no hay, asumimos https)
-    $siteForParse = preg_match('~^https?://~i', $siteRaw) ? $siteRaw : ('https://' . ltrim($siteRaw, '/'));
+    // ✅ 2) permite override temporal para debug: /verWp/{id}?site_key=....
+    $override = (string) request()->query('site_key', '');
+    if ($override !== '') {
+        $siteKey = $override;
+    }
 
-    $u = parse_url($siteForParse);
-    $host = strtolower((string)($u['host'] ?? ''));
-    $path = rtrim((string)($u['path'] ?? ''), '/');
+    // ✅ 3) fallback (NO ideal, pero por si aún no guardas wp_site_key)
+    if ($siteKey === '') {
+        $site = rtrim((string)$dominio->url, '/');
+        $siteKey = md5($site);
+    }
 
-    // Quita www para estabilidad (si tu webhook a veces trae con/ sin www)
-    $hostNoWww = preg_replace('~^www\.~i', '', $host);
-
-    // Canonical para cache: host sin www + path (si aplica)
-    $siteCanonical = $hostNoWww . $path;
-
-    // ========= 2) Prueba varios siteKeys (nuevo y legacy) =========
-    $candidateKeys = array_values(array_unique(array_filter([
-        md5($siteCanonical),
-        md5($siteRaw), // legacy: lo que tú tenías antes
-        md5(str_replace(['https://','http://'], '', $siteRaw)), // legacy extra
-    ])));
-
-    $pickFirstWithData = function (string $suffix, array $fallback = []) use ($candidateKeys) {
-        foreach ($candidateKeys as $k) {
-            $v = \Cache::get("{$suffix}:{$k}", null);
-            if (is_array($v) && !empty($v)) return [$k, $v];
-        }
-        // si ninguno tiene data, regresamos el primero igual para meta/counts
-        $k0 = $candidateKeys[0] ?? md5('unknown');
-        $v0 = \Cache::get("{$suffix}:{$k0}", $fallback);
-        return [$k0, is_array($v0) ? $v0 : $fallback];
-    };
-
-    // snapshots
-    [$siteKey, $postsRaw] = $pickFirstWithData('inv:post', []);
-    [$_,      $pagesRaw]  = $pickFirstWithData('inv:page', []);
+    // Raw snapshots
+    $postsRaw = Cache::get("inv:{$siteKey}:post", []);
+    $pagesRaw = Cache::get("inv:{$siteKey}:page", []);
 
     $postsRaw = is_array($postsRaw) ? $postsRaw : [];
     $pagesRaw = is_array($pagesRaw) ? $pagesRaw : [];
 
-    // meta
-    $metaPosts = \Cache::get("inv_meta:{$siteKey}:post", []);
-    $metaPages = \Cache::get("inv_meta:{$siteKey}:page", []);
+    // Meta
+    $metaPosts = Cache::get("inv_meta:{$siteKey}:post", []);
+    $metaPages = Cache::get("inv_meta:{$siteKey}:page", []);
+
     $metaPosts = is_array($metaPosts) ? $metaPosts : [];
     $metaPages = is_array($metaPages) ? $metaPages : [];
 
     $syncPosts = [
-        'has_data'   => !empty($postsRaw),
-        'complete'   => (bool)($metaPosts['is_complete'] ?? false),
-        'updated_at' => $metaPosts['updated_at'] ?? null,
-        'run_id'     => $metaPosts['run_id'] ?? null,
+        'has_data'    => !empty($postsRaw),
+        'complete'    => (bool)($metaPosts['is_complete'] ?? false),
+        'updated_at'  => $metaPosts['updated_at'] ?? null,
+        'run_id'      => $metaPosts['run_id'] ?? null,
     ];
 
     $syncPages = [
-        'has_data'   => !empty($pagesRaw),
-        'complete'   => (bool)($metaPages['is_complete'] ?? false),
-        'updated_at' => $metaPages['updated_at'] ?? null,
-        'run_id'     => $metaPages['run_id'] ?? null,
+        'has_data'    => !empty($pagesRaw),
+        'complete'    => (bool)($metaPages['is_complete'] ?? false),
+        'updated_at'  => $metaPages['updated_at'] ?? null,
+        'run_id'      => $metaPages['run_id'] ?? null,
     ];
 
-    // ========= 3) Orden seguro por modified desc =========
-    $safeTime = fn($x) => strtotime((string)($x['modified'] ?? '')) ?: 0;
+    // Ordenar por modified desc
+    usort($postsRaw, fn($a, $b) => strcmp((string)($b['modified'] ?? ''), (string)($a['modified'] ?? '')));
+    usort($pagesRaw, fn($a, $b) => strcmp((string)($b['modified'] ?? ''), (string)($a['modified'] ?? '')));
 
-    usort($postsRaw, fn($a, $b) => $safeTime($b) <=> $safeTime($a));
-    usort($pagesRaw, fn($a, $b) => $safeTime($b) <=> $safeTime($a));
-
-    // ========= 4) Mapper robusto (wp_id/id + title string/array) =========
-    $mapItem = function ($x) {
-        $id = $x['wp_id'] ?? $x['id'] ?? null;
-
+    // Mapear a formato Blade
+    $posts = array_map(function ($x) {
         $title = $x['title'] ?? 'Sin título';
-        if (is_array($title)) {
-            $title = $title['rendered'] ?? ($title[0] ?? 'Sin título');
-        }
-        $title = is_string($title) ? $title : 'Sin título';
-
         return [
-            'id'     => $id,
+            'id'     => $x['wp_id'] ?? null,
             'slug'   => $x['slug'] ?? null,
             'status' => $x['status'] ?? null,
-            'date'   => $x['date'] ?? ($x['modified'] ?? null), // fallback si no hay date
+            'date'   => $x['date'] ?? null,
             'link'   => $x['link'] ?? null,
             'title'  => ['rendered' => $title],
             'modified' => $x['modified'] ?? null,
         ];
-    };
+    }, $postsRaw);
 
-    $posts = array_map($mapItem, $postsRaw);
-    $pages = array_map($mapItem, $pagesRaw);
+    $pages = array_map(function ($x) {
+        $title = $x['title'] ?? 'Sin título';
+        return [
+            'id'     => $x['wp_id'] ?? null,
+            'slug'   => $x['slug'] ?? null,
+            'status' => $x['status'] ?? null,
+            'date'   => $x['date'] ?? null,
+            'link'   => $x['link'] ?? null,
+            'title'  => ['rendered' => $title],
+            'modified' => $x['modified'] ?? null,
+        ];
+    }, $pagesRaw);
 
-    // ========= 5) Counts =========
-    $countPosts = \Cache::get("inv_counts:{$siteKey}:post", []);
-    $countPages = \Cache::get("inv_counts:{$siteKey}:page", []);
+    // Counts
+    $countPosts = Cache::get("inv_counts:{$siteKey}:post", []);
+    $countPages = Cache::get("inv_counts:{$siteKey}:page", []);
+
     $countPosts = is_array($countPosts) ? $countPosts : [];
     $countPages = is_array($countPages) ? $countPages : [];
 
@@ -315,7 +298,6 @@ public function verWp($id, WordpressService $wp)
         $countPages[$st] = (int)($countPages[$st] ?? 0);
     }
 
-    // no paginamos real aquí
     $perPagePosts = 50; $perPagePages = 50; $pagePosts = 1; $pagePages = 1;
 
     return view('Dominios.DominioContenido', compact(
@@ -332,6 +314,7 @@ public function verWp($id, WordpressService $wp)
         'pagePages'
     ));
 }
+
 
 
 
