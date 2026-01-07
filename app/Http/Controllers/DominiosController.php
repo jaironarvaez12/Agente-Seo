@@ -11,6 +11,7 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Log;
 use App\Services\WordpressService;
 use Illuminate\Support\Facades\Http;
 use App\Jobs\GenerarContenidoKeywordJob;
