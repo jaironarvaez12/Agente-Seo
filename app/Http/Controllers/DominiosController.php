@@ -212,35 +212,53 @@ public function verWp($id, WordpressService $wp)
 {
     $dominio = DominiosModel::findOrFail($id);
 
-    // ✅ 1) intenta usar el site_key real que manda WP (guardado en BD)
-    $siteKey = (string)($dominio->wp_site_key ?? '');
+    // 1) site_key guardado en BD (lo correcto en multi-dominio)
+    $siteKeyDb = (string)($dominio->wp_site_key ?? '');
 
-    // ✅ 2) permite override temporal para debug: /verWp/{id}?site_key=....
+    // 2) override por querystring para debug
     $override = (string) request()->query('site_key', '');
-    if ($override !== '') {
-        $siteKey = $override;
+    $siteKey = $override !== '' ? $override : $siteKeyDb;
+
+    // 3) Si NO hay siteKey, no hay forma confiable (evita md5(url) que suele fallar)
+    if ($siteKey === '') {
+        return back()->with('error', 'Este dominio aún no tiene wp_site_key. Entra al WordPress, ejecuta "Enviar inventario ahora" y asegúrate que tu endpoint /api/wp/webhook guarde wp_site_key en este dominio.');
     }
 
-    // ✅ 3) fallback (NO ideal, pero por si aún no guardas wp_site_key)
-    if ($siteKey === '') {
-        $site = rtrim((string)$dominio->url, '/');
-        $siteKey = md5($site);
-    }
+    // Keys
+    $kPosts  = "inv:{$siteKey}:post";
+    $kPages  = "inv:{$siteKey}:page";
+    $kMetaP  = "inv_meta:{$siteKey}:post";
+    $kMetaPg = "inv_meta:{$siteKey}:page";
+    $kCntP   = "inv_counts:{$siteKey}:post";
+    $kCntPg  = "inv_counts:{$siteKey}:page";
 
     // Raw snapshots
-    $postsRaw = Cache::get("inv:{$siteKey}:post", []);
-    $pagesRaw = Cache::get("inv:{$siteKey}:page", []);
+    $postsRaw = Cache::get($kPosts, []);
+    $pagesRaw = Cache::get($kPages, []);
 
     $postsRaw = is_array($postsRaw) ? $postsRaw : [];
     $pagesRaw = is_array($pagesRaw) ? $pagesRaw : [];
 
     // Meta
-    $metaPosts = Cache::get("inv_meta:{$siteKey}:post", []);
-    $metaPages = Cache::get("inv_meta:{$siteKey}:page", []);
+    $metaPosts = Cache::get($kMetaP, []);
+    $metaPages = Cache::get($kMetaPg, []);
 
     $metaPosts = is_array($metaPosts) ? $metaPosts : [];
     $metaPages = is_array($metaPages) ? $metaPages : [];
 
+    // Counts
+    $countPosts = Cache::get($kCntP, []);
+    $countPages = Cache::get($kCntPg, []);
+
+    $countPosts = is_array($countPosts) ? $countPosts : [];
+    $countPages = is_array($countPages) ? $countPages : [];
+
+    foreach (['publish','draft','future','pending','private'] as $st) {
+        $countPosts[$st] = (int)($countPosts[$st] ?? 0);
+        $countPages[$st] = (int)($countPages[$st] ?? 0);
+    }
+
+    // Sync meta
     $syncPosts = [
         'has_data'    => !empty($postsRaw),
         'complete'    => (bool)($metaPosts['is_complete'] ?? false),
@@ -263,12 +281,12 @@ public function verWp($id, WordpressService $wp)
     $posts = array_map(function ($x) {
         $title = $x['title'] ?? 'Sin título';
         return [
-            'id'     => $x['wp_id'] ?? null,
-            'slug'   => $x['slug'] ?? null,
-            'status' => $x['status'] ?? null,
-            'date'   => $x['date'] ?? null,
-            'link'   => $x['link'] ?? null,
-            'title'  => ['rendered' => $title],
+            'id'       => $x['wp_id'] ?? null,
+            'slug'     => $x['slug'] ?? null,
+            'status'   => $x['status'] ?? null,
+            'date'     => $x['date'] ?? null,
+            'link'     => $x['link'] ?? null,
+            'title'    => ['rendered' => $title],
             'modified' => $x['modified'] ?? null,
         ];
     }, $postsRaw);
@@ -276,26 +294,52 @@ public function verWp($id, WordpressService $wp)
     $pages = array_map(function ($x) {
         $title = $x['title'] ?? 'Sin título';
         return [
-            'id'     => $x['wp_id'] ?? null,
-            'slug'   => $x['slug'] ?? null,
-            'status' => $x['status'] ?? null,
-            'date'   => $x['date'] ?? null,
-            'link'   => $x['link'] ?? null,
-            'title'  => ['rendered' => $title],
+            'id'       => $x['wp_id'] ?? null,
+            'slug'     => $x['slug'] ?? null,
+            'status'   => $x['status'] ?? null,
+            'date'     => $x['date'] ?? null,
+            'link'     => $x['link'] ?? null,
+            'title'    => ['rendered' => $title],
             'modified' => $x['modified'] ?? null,
         ];
     }, $pagesRaw);
 
-    // Counts
-    $countPosts = Cache::get("inv_counts:{$siteKey}:post", []);
-    $countPages = Cache::get("inv_counts:{$siteKey}:page", []);
+    // Log útil para debug (no rompe nada)
+    Log::info('verWp debug', [
+        'dominio_id' => $dominio->id_dominio ?? $dominio->id ?? null,
+        'siteKey_db' => $siteKeyDb,
+        'siteKey_used' => $siteKey,
+        'cache_keys' => [$kPosts, $kPages, $kMetaP, $kMetaPg, $kCntP, $kCntPg],
+        'counts' => [
+            'posts_raw' => count($postsRaw),
+            'pages_raw' => count($pagesRaw),
+        ],
+    ]);
 
-    $countPosts = is_array($countPosts) ? $countPosts : [];
-    $countPages = is_array($countPages) ? $countPages : [];
-
-    foreach (['publish','draft','future','pending','private'] as $st) {
-        $countPosts[$st] = (int)($countPosts[$st] ?? 0);
-        $countPages[$st] = (int)($countPages[$st] ?? 0);
+    // Debug visible si quieres: /dominios/2/wp?debug=1
+    if (request()->boolean('debug')) {
+        dd([
+            'siteKey_db' => $siteKeyDb,
+            'siteKey_used' => $siteKey,
+            'keys' => [
+                'posts' => $kPosts,
+                'pages' => $kPages,
+                'meta_posts' => $kMetaP,
+                'meta_pages' => $kMetaPg,
+                'count_posts' => $kCntP,
+                'count_pages' => $kCntPg,
+            ],
+            'counts' => [
+                'posts_raw' => count($postsRaw),
+                'pages_raw' => count($pagesRaw),
+            ],
+            'meta_posts' => $metaPosts,
+            'meta_pages' => $metaPages,
+            'countPosts' => $countPosts,
+            'countPages' => $countPages,
+            'sample_post' => $postsRaw[0] ?? null,
+            'sample_page' => $pagesRaw[0] ?? null,
+        ]);
     }
 
     $perPagePosts = 50; $perPagePages = 50; $pagePosts = 1; $pagePages = 1;
