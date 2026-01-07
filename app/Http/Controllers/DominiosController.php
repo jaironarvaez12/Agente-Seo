@@ -632,34 +632,38 @@ public function publicar($dominio, int $detalle): RedirectResponse
 
         $wpBase = rtrim((string)$dom->url, '/');
 
-        $urlRest = $wpBase . '/wp-json/lws/v1/upsert';
+        $urlRest     = $wpBase . '/wp-json/lws/v1/upsert';
         $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
 
-        $type = ($it->tipo === 'page') ? 'page' : 'post';
+        // ✅ Robustez: normaliza el tipo (evita que "Page"/"PAGE"/" pagina " se vaya a post)
+        $tipoNorm = strtolower(trim((string) $it->tipo));
+        $type = ($tipoNorm === 'page') ? 'page' : 'post';
 
         if (empty($it->contenido_html)) {
             throw new \RuntimeException('contenido_html está vacío (no hay nada que publicar).');
         }
+
+        // ✅ Canvas solo aplica a pages (WordPress guarda esto como meta _wp_page_template)
+        // WordPress usa el meta "_wp_page_template" para la plantilla.
+        $canvas = ($type === 'page') ? 'elementor_canvas' : '';
 
         $payload = [
             'type'  => $type,
             'wp_id' => $it->wp_id ?: null,
 
             'title'   => $it->title ?: ($it->keyword ?: 'Sin título'),
-            'content' => $it->contenido_html,  // 👈 JSON Elementor guardado en BD
+            'content' => $it->contenido_html,  // JSON Elementor guardado en BD
 
-            // ✅ importante para el plugin
+            // importante para el plugin
             'builder' => 'elementor',
 
-            // ✅ evita el “encajonado” por el header/theme
-            // si quieres header/footer: usa 'elementor_full_width'
-            'wp_page_template' => ($type === 'page') ? 'elementor_canvas' : '',
+            // ✅ (1) Campo custom para tu plugin (debe mapear a _wp_page_template)
+            'wp_page_template' => $canvas,
 
-            // status normal
+            // ✅ (2) Campo estándar WP REST (si tu plugin lo respeta / o si luego migras a /wp/v2/pages)
+            'template' => $canvas,
+
             'status' => 'publish',
-
-            // programar si quieres:
-            // 'schedule_at' => '2025-12-19 10:00:00',
         ];
 
         $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -667,7 +671,7 @@ public function publicar($dominio, int $detalle): RedirectResponse
             throw new \RuntimeException('No se pudo serializar payload JSON');
         }
 
-        $ts = time();
+        $ts  = time();
         $sig = hash_hmac('sha256', $ts . '.' . $body, $secret);
 
         $headers = [
@@ -690,6 +694,7 @@ public function publicar($dominio, int $detalle): RedirectResponse
             $it->estatus = 'error';
             $it->error = $msg;
             $it->save();
+
             return back()->with('error', 'No se pudo publicar: ' . $msg);
         }
 
