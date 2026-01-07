@@ -1,6 +1,22 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Cache;
+
+Route::get('/debug/wp-cache', function () {
+    $siteKey = request('site_key', '');
+    if ($siteKey === '') return response()->json(['error'=>'missing site_key'], 400);
+
+    return response()->json([
+        'site_key' => $siteKey,
+        'inv_post_count'  => is_array(Cache::get("inv:{$siteKey}:post")) ? count(Cache::get("inv:{$siteKey}:post")) : null,
+        'inv_page_count'  => is_array(Cache::get("inv:{$siteKey}:page")) ? count(Cache::get("inv:{$siteKey}:page")) : null,
+        'meta_post' => Cache::get("inv_meta:{$siteKey}:post"),
+        'meta_page' => Cache::get("inv_meta:{$siteKey}:page"),
+        'counts_post' => Cache::get("inv_counts:{$siteKey}:post"),
+        'counts_page' => Cache::get("inv_counts:{$siteKey}:page"),
+    ]);
+});
 
 
 
@@ -29,6 +45,23 @@ Route::group(['middleware' => 'auth'], function(){
 
 
 Route::post('/wp/webhook', [App\Http\Controllers\WordpressWebhookController::class, 'handle']);
+
+
+Route::get('/debug/wp-cache', function () {
+    $siteKey = request('site_key', '');
+    if ($siteKey === '') return response()->json(['error'=>'missing site_key'], 400);
+
+    return response()->json([
+        'site_key' => $siteKey,
+        'inv_post_count'  => is_array(Cache::get("inv:{$siteKey}:post")) ? count(Cache::get("inv:{$siteKey}:post")) : null,
+        'inv_page_count'  => is_array(Cache::get("inv:{$siteKey}:page")) ? count(Cache::get("inv:{$siteKey}:page")) : null,
+        'meta_post' => Cache::get("inv_meta:{$siteKey}:post"),
+        'meta_page' => Cache::get("inv_meta:{$siteKey}:page"),
+        'counts_post' => Cache::get("inv_counts:{$siteKey}:post"),
+        'counts_page' => Cache::get("inv_counts:{$siteKey}:page"),
+    ]);
+});
+
 
 
 Route::post('dominios/{dominio}/contenido/{detalle}/publicar', [App\Http\Controllers\DominiosController::class, 'publicar'])
