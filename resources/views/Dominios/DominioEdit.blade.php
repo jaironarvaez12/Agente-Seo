@@ -78,7 +78,7 @@
                                     // Cambia esto cuando quieras
                                     $wpIdToJsonPath = [
                                         // 196 => 'elementor/elementor-10.json',
-                                         179 => 'elementor/elementor-10-pretty.json',
+                                         179 => 'elementor/elementor-10.json',
                                          130 => 'elementor/elementor-idei.json',
                                     ]; 
 
