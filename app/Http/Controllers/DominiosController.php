@@ -213,16 +213,26 @@ public function verWp($id, WordpressService $wp)
 {
     $dominio = DominiosModel::findOrFail($id);
 
-    // 1) site_key guardado en BD (lo correcto en multi-dominio)
-    $siteKeyDb = (string)($dominio->wp_site_key ?? '');
+    /**
+     * ✅ CAMBIO PRINCIPAL:
+     * - Ya NO usamos $dominio->wp_site_key
+     * - Calculamos siteKey = md5(url_wp)
+     * - Permitimos override ?site_key=... para debug
+     */
 
-    // 2) override por querystring para debug
+    // 🔧 AJUSTA ESTE CAMPO al nombre real de tu columna con la URL del WP:
+    $wpUrl = rtrim((string)($dominio->url_wordpress ?? ''), '/'); // <-- CAMBIAR SI ES OTRO
+
+    // Override por querystring para debug
     $override = (string) request()->query('site_key', '');
-    $siteKey = $override !== '' ? $override : $siteKeyDb;
+    $siteKey = $override !== '' ? $override : '';
 
-    // 3) Si NO hay siteKey, no hay forma confiable (evita md5(url) que suele fallar)
+    // Si no hay override, calculamos desde la URL guardada
     if ($siteKey === '') {
-        return back()->with('error', 'Este dominio aún no tiene wp_site_key. Entra al WordPress, ejecuta "Enviar inventario ahora" y asegúrate que tu endpoint /api/wp/webhook guarde wp_site_key en este dominio.');
+        if ($wpUrl === '') {
+            return back()->with('error', 'Este dominio no tiene URL de WordPress guardada. Guarda la URL del sitio WP y vuelve a intentar.');
+        }
+        $siteKey = md5($wpUrl);
     }
 
     // Keys
@@ -305,10 +315,10 @@ public function verWp($id, WordpressService $wp)
         ];
     }, $pagesRaw);
 
-    // Log útil para debug (no rompe nada)
+    // Log útil para debug
     Log::info('verWp debug', [
         'dominio_id' => $dominio->id_dominio ?? $dominio->id ?? null,
-        'siteKey_db' => $siteKeyDb,
+        'wpUrl_db'   => $wpUrl,
         'siteKey_used' => $siteKey,
         'cache_keys' => [$kPosts, $kPages, $kMetaP, $kMetaPg, $kCntP, $kCntPg],
         'counts' => [
@@ -317,10 +327,10 @@ public function verWp($id, WordpressService $wp)
         ],
     ]);
 
-    // Debug visible si quieres: /dominios/2/wp?debug=1
+    // Debug visible: /dominios/2/wp?debug=1
     if (request()->boolean('debug')) {
         dd([
-            'siteKey_db' => $siteKeyDb,
+            'wpUrl_db' => $wpUrl,
             'siteKey_used' => $siteKey,
             'keys' => [
                 'posts' => $kPosts,
@@ -359,6 +369,7 @@ public function verWp($id, WordpressService $wp)
         'pagePages'
     ));
 }
+
 
 
 
