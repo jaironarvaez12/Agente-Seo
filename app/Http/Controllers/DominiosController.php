@@ -221,7 +221,7 @@ public function verWp($id, WordpressService $wp)
      */
 
     // 🔧 AJUSTA ESTE CAMPO al nombre real de tu columna con la URL del WP:
-    $wpUrl = rtrim((string)($dominio->url_wordpress ?? ''), '/'); // <-- CAMBIAR SI ES OTRO
+    $wpUrl = rtrim((string)($dominio->url ?? ''), '/'); // <-- CAMBIAR SI ES OTRO
 
     // Override por querystring para debug
     $override = (string) request()->query('site_key', '');
