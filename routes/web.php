@@ -22,7 +22,7 @@ Route::get('/debug/wp-cache', function () {
 
 
 Route::group(['middleware' => 'auth'], function(){
-    Route::get('/',[App\Http\Controllers\DominiosController::class, 'dominios'])->name('inicio');
+    Route::get('/',[App\Http\Controllers\DominiosController::class, 'index'])->name('inicio');
 
     //Usuarios
        Route::resource('usuarios','App\Http\Controllers\UsuariosController');
