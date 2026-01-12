@@ -9,6 +9,9 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
 
+/**
+ * Secret
+ */
 $getSecret = function (): ?string {
     $secret = config('services.wp_webhook.secret');
     if (!is_string($secret) || trim($secret) === '') {
@@ -18,6 +21,9 @@ $getSecret = function (): ?string {
     return ($secret !== '') ? $secret : null;
 };
 
+/**
+ * Validate HMAC(ts.body)
+ */
 $validate = function (Request $r, ?string $secret) : array {
     $raw = (string) $r->getContent();
     $sig = $r->header('X-Signature');
@@ -29,7 +35,7 @@ $validate = function (Request $r, ?string $secret) : array {
     if ($tsHeader === null) return [false, 'missing_timestamp'];
     if ($ts === null || $ts <= 0) return [false, 'invalid_timestamp'];
 
-    $window = 300;
+    $window = (int) env('WP_WEBHOOK_WINDOW', 300);
     if (abs(time() - $ts) > $window) return [false, 'timestamp_out_of_window'];
 
     $calc = hash_hmac('sha256', $ts . '.' . $raw, $secret);
@@ -38,13 +44,25 @@ $validate = function (Request $r, ?string $secret) : array {
     return [true, 'ok'];
 };
 
-$ttl = function () {
-    $days = (int) env('WP_INV_TTL_DAYS', 30); // ✅ default 30 días
-    if ($days <= 0) $days = 30;
-    return now()->addDays($days);
+/**
+ * TTL para TMP (corrida en progreso) -> corto
+ */
+$tmpTtl = function () {
+    $mins = (int) env('WP_INV_TMP_TTL_MIN', 60); // default 60 min
+    if ($mins <= 0) $mins = 60;
+    return now()->addMinutes($mins);
 };
 
-$rememberRejected = function (string $endpointKey, Request $r, array $payload, string $reason) use ($ttl): void {
+/**
+ * Rejected TTL (debug) -> corto/medio
+ */
+$rejTtl = function () {
+    $mins = (int) env('WP_INV_REJ_TTL_MIN', 60); // 60 min
+    if ($mins <= 0) $mins = 60;
+    return now()->addMinutes($mins);
+};
+
+$rememberRejected = function (string $endpointKey, Request $r, array $payload, string $reason) use ($rejTtl): void {
     Cache::put($endpointKey . '_rejected', [
         'at' => now()->toDateTimeString(),
         'ip' => $r->ip(),
@@ -56,11 +74,11 @@ $rememberRejected = function (string $endpointKey, Request $r, array $payload, s
         'type' => $payload['type'] ?? null,
         'post_type' => $payload['post_type'] ?? null,
         'wp_id' => $payload['wp_id'] ?? null,
-    ], $ttl());
+    ], $rejTtl());
 };
 
 /**
- * Recalcula counts por status a partir del snapshot
+ * Recalcula counts por status
  */
 $recalcCounts = function(array $items): array {
     $counts = [];
@@ -70,18 +88,30 @@ $recalcCounts = function(array $items): array {
         if ($st === '') $st = 'unknown';
         $counts[$st] = ($counts[$st] ?? 0) + 1;
     }
-    // normaliza estados esperados
     foreach (['publish','draft','future','pending','private'] as $st) {
         $counts[$st] = (int)($counts[$st] ?? 0);
     }
     return $counts;
 };
 
+/**
+ * Helpers snapshot keys
+ */
+$keysFor = function(string $site, string $type): array {
+    $siteKey = md5(rtrim($site, '/'));
+    return [
+        'siteKey' => $siteKey,
+        'invKey'  => "inv:{$siteKey}:{$type}",
+        'cntKey'  => "inv_counts:{$siteKey}:{$type}",
+        'metaKey' => "inv_meta:{$siteKey}:{$type}",
+    ];
+};
+
 /* =========================================================
  *  WEBHOOK: eventos (upsert/status/delete)
- *  ✅ AHORA TAMBIÉN PARCHEA EL INVENTARIO
+ *  ✅ parchea snapshot FOREVER
  * ========================================================= */
-Route::post('/wp/webhook', function (Request $r) use ($getSecret, $validate, $rememberRejected, $ttl, $recalcCounts) {
+Route::post('/wp/webhook', function (Request $r) use ($getSecret, $validate, $rememberRejected, $recalcCounts, $keysFor) {
     $payload = $r->json()->all();
     if (!is_array($payload)) $payload = [];
 
@@ -91,50 +121,46 @@ Route::post('/wp/webhook', function (Request $r) use ($getSecret, $validate, $re
     if (!$ok) {
         $rememberRejected('wp_webhook_last', $r, $payload, $reason);
         Log::warning('WP WEBHOOK UNAUTHORIZED', [
-            'ip'=>$r->ip(), 'reason'=>$reason, 'site'=>$payload['site'] ?? ($payload['_site'] ?? null)
+            'ip'=>$r->ip(),
+            'reason'=>$reason,
+            'site'=>$payload['site'] ?? ($payload['_site'] ?? null)
         ]);
         return response()->json(['ok'=>false,'error'=>'unauthorized','reason'=>$reason], 401);
     }
 
-    // ✅ site puede venir como "site" o "_site" (según tu plugin)
-    $site = rtrim((string)($payload['site'] ?? ($payload['_site'] ?? '')), '/');
-    $postType = (string)($payload['post_type'] ?? ''); // post|page
-    $eventType = (string)($payload['type'] ?? '');     // upsert|status|delete
-
+    // debug last webhook
     Cache::put('wp_webhook_last', [
         'at'   => now()->toDateTimeString(),
         'ip'   => $r->ip(),
         'mode' => 'ts_body',
         'data' => $payload,
-    ], $ttl());
+    ], now()->addMinutes(60));
 
-    // Si no tenemos site o post_type, igual respondemos ok (pero no parchamos)
-    if ($site === '' || !in_array($postType, ['post','page'], true)) {
-        return response()->json(['ok'=>true, 'note'=>'no_site_or_post_type']);
+    $site     = rtrim((string)($payload['site'] ?? ($payload['_site'] ?? '')), '/');
+    $postType = (string)($payload['post_type'] ?? '');
+    $eventType= (string)($payload['type'] ?? '');
+    $wpId     = isset($payload['wp_id']) ? (int)$payload['wp_id'] : 0;
+
+    if ($site === '' || !in_array($postType, ['post','page'], true) || $wpId <= 0) {
+        return response()->json(['ok'=>true, 'note'=>'no_patch']);
     }
 
-    $siteKey = md5($site);
-    $invKey = "inv:{$siteKey}:{$postType}";
-    $cntKey = "inv_counts:{$siteKey}:{$postType}";
-    $metaKey = "inv_meta:{$siteKey}:{$postType}";
+    $k = $keysFor($site, $postType);
+    $invKey  = $k['invKey'];
+    $cntKey  = $k['cntKey'];
+    $metaKey = $k['metaKey'];
 
     $items = Cache::get($invKey, []);
     if (!is_array($items)) $items = [];
 
-    // index por wp_id
     $byId = [];
     foreach ($items as $it) {
-        if (is_array($it) && isset($it['wp_id'])) {
-            $byId[(int)$it['wp_id']] = $it;
-        }
+        if (is_array($it) && isset($it['wp_id'])) $byId[(int)$it['wp_id']] = $it;
     }
 
-    $wpId = isset($payload['wp_id']) ? (int)$payload['wp_id'] : 0;
-
-    if ($eventType === 'delete' && $wpId > 0) {
+    if ($eventType === 'delete') {
         unset($byId[$wpId]);
-    } elseif (in_array($eventType, ['upsert','status'], true) && $wpId > 0) {
-        // ✅ Guardamos SOLO campos necesarios para inventario
+    } elseif (in_array($eventType, ['upsert','status'], true)) {
         $byId[$wpId] = [
             'type'            => 'inventory_item',
             'wp_id'           => $wpId,
@@ -153,27 +179,22 @@ Route::post('/wp/webhook', function (Request $r) use ($getSecret, $validate, $re
     }
 
     $merged = array_values($byId);
-
-    // ordenar por modified desc (como en tu controlador)
     usort($merged, fn($a,$b) => strcmp((string)($b['modified'] ?? ''), (string)($a['modified'] ?? '')));
 
-    Cache::put($invKey, $merged, $ttl());
-    Cache::put($cntKey, $recalcCounts($merged), $ttl());
+    // ✅ SNAPSHOT NO EXPIRA
+    Cache::forever($invKey, $merged);
+    Cache::forever($cntKey, $recalcCounts($merged));
 
-    // meta: lo dejamos marcado como “no necesariamente completo” si nunca corrió inventario,
-    // pero siempre “updated”
     $meta = Cache::get($metaKey, []);
     if (!is_array($meta)) $meta = [];
     $meta['updated_at'] = now()->toDateTimeString();
     $meta['last_event'] = $eventType;
-    Cache::put($metaKey, $meta, $ttl());
+    $meta['is_complete'] = $meta['is_complete'] ?? false;
+    Cache::forever($metaKey, $meta);
 
     return response()->json(['ok'=>true]);
 });
 
-/* =========================================================
- *  WEBHOOK DEBUG
- * ========================================================= */
 Route::get('/wp/webhook/last', function (Request $r) {
     return response()->json([
         'last_ok' => Cache::get('wp_webhook_last', ['ok'=>false,'message'=>'Aún no ha llegado nada']),
@@ -183,9 +204,11 @@ Route::get('/wp/webhook/last', function (Request $r) {
 
 /* =========================================================
  *  INVENTORY: batches desde WP
- *  ✅ TTL largo + snapshot parcial por batch + NO borrar final
+ *  ✅ snapshot FOREVER
+ *  ✅ tmp TTL corto
+ *  ✅ NO resetear a 0 en Laravel nunca
  * ========================================================= */
-Route::post('/wp/inventory', function (Request $r) use ($getSecret, $validate, $rememberRejected, $ttl, $recalcCounts) {
+Route::post('/wp/inventory', function (Request $r) use ($getSecret, $validate, $rememberRejected, $tmpTtl, $recalcCounts, $keysFor) {
     $payload = $r->json()->all();
     if (!is_array($payload)) $payload = [];
 
@@ -197,10 +220,10 @@ Route::post('/wp/inventory', function (Request $r) use ($getSecret, $validate, $
         return response()->json(['ok'=>false,'error'=>'unauthorized','reason'=>$reason], 401);
     }
 
-    $site = rtrim((string)($payload['site'] ?? ($payload['_site'] ?? '')), '/');
-    $type = (string)($payload['type'] ?? '');
+    $site  = rtrim((string)($payload['site'] ?? ($payload['_site'] ?? '')), '/');
+    $type  = (string)($payload['type'] ?? '');
     $runId = (string)($payload['run_id'] ?? '');
-    $isLast = (bool)($payload['is_last'] ?? false);
+    $isLast= (bool)($payload['is_last'] ?? false);
     $items = $payload['items'] ?? [];
     if (!is_array($items)) $items = [];
 
@@ -208,17 +231,18 @@ Route::post('/wp/inventory', function (Request $r) use ($getSecret, $validate, $
         return response()->json(['ok'=>false,'error'=>'bad_payload'], 422);
     }
 
-    $siteKey = md5($site);
+    $k = $keysFor($site, $type);
+    $siteKey = $k['siteKey'];
+    $invKey  = $k['invKey'];
+    $cntKey  = $k['cntKey'];
+    $metaKey = $k['metaKey'];
 
-    $tmpKey  = "inv_tmp:{$siteKey}:{$type}:{$runId}";
-    $invKey  = "inv:{$siteKey}:{$type}";
-    $cntKey  = "inv_counts:{$siteKey}:{$type}";
-    $metaKey = "inv_meta:{$siteKey}:{$type}";
+    $tmpKey = "inv_tmp:{$siteKey}:{$type}:{$runId}";
 
     $current = Cache::get($tmpKey, []);
     if (!is_array($current)) $current = [];
 
-    // merge con dedupe por wp_id
+    // dedupe por wp_id
     $byId = [];
     foreach ($current as $it) {
         if (is_array($it) && isset($it['wp_id'])) $byId[(int)$it['wp_id']] = $it;
@@ -229,21 +253,22 @@ Route::post('/wp/inventory', function (Request $r) use ($getSecret, $validate, $
 
     $merged = array_values($byId);
 
-    // guardar tmp y snapshot parcial (TTL largo)
-    Cache::put($tmpKey, $merged, $ttl());
+    // TMP corto (para no llenar cache)
+    Cache::put($tmpKey, $merged, $tmpTtl());
 
+    // snapshot ordenado
     usort($merged, fn($a,$b) => strcmp((string)($b['modified'] ?? ''), (string)($a['modified'] ?? '')));
 
-    Cache::put($invKey, $merged, $ttl());
-    Cache::put($cntKey, $recalcCounts($merged), $ttl());
+    // ✅ SNAPSHOT NO EXPIRA
+    Cache::forever($invKey, $merged);
+    Cache::forever($cntKey, $recalcCounts($merged));
+    Cache::forever($metaKey, [
+        'run_id'      => $runId,
+        'is_complete' => $isLast,
+        'updated_at'  => now()->toDateTimeString(),
+    ]);
 
-    Cache::put($metaKey, [
-        'run_id'       => $runId,
-        'is_complete'  => $isLast,
-        'updated_at'   => now()->toDateTimeString(),
-    ], $ttl());
-
-    // si terminó, limpiamos tmp (opcional)
+    // si terminó, limpiamos tmp
     if ($isLast) {
         Cache::forget($tmpKey);
     }
@@ -258,7 +283,7 @@ Route::post('/wp/inventory', function (Request $r) use ($getSecret, $validate, $
         'received' => count($items),
         'run_id' => $runId,
         'is_last' => $isLast,
-    ], $ttl());
+    ], now()->addMinutes(60));
 
     return response()->json(['ok'=>true,'site'=>$site,'type'=>$type,'received'=>count($items),'is_last'=>$isLast]);
 });
@@ -282,10 +307,10 @@ Route::get('/wp/inventory/snapshot', function (Request $r) {
 
 Route::get('/wp/inventory/last', function (Request $r) {
     $site = (string)$r->query('site', '');
-    if ($site === '') {
-        return response()->json(['ok'=>false,'error'=>'missing_site'], 400);
-    }
+    if ($site === '') return response()->json(['ok'=>false,'error'=>'missing_site'], 400);
+
     $key = 'wp_inventory_last_' . md5(rtrim($site,'/'));
+
     return response()->json([
         'last_ok' => Cache::get($key, ['ok'=>false,'message'=>'Aún no ha llegado inventario']),
         'last_rejected' => $r->query('debug') ? Cache::get('wp_inventory_last_rejected', ['message'=>'No hay rechazados']) : null,
