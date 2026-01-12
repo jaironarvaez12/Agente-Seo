@@ -117,18 +117,52 @@
                                                 <div class="col-md-6">
                                                     <div class="tpl-card border radius-12 overflow-hidden bg-white {{ $isSelected ? 'tpl-selected' : '' }}">
                                                         {{-- Miniatura genérica (solo imagen visual) --}}
-                                                        <div class="d-flex align-items-center justify-content-center"
-                                                             style="height:180px; background:#f6f7f9;">
-                                                            <div class="text-center px-3">
-                                                                <div class="fw-semibold text-dark">{{ $title }}</div>
-                                                                <small class="text-muted">WP ID: {{ $id }}</small>
+                                                        @php
+                                                            // Imagen fija (si no existe o no quieres usarla, pon null)
+                                                            $fixedBg = asset('images/PRUEBA.png');
+
+                                                            // Si quieres forzar "sin imagen" en algún momento:
+                                                            // $fixedBg = null;
+                                                        @endphp
+
+                                                        <div class="d-flex align-items-center justify-content-center position-relative overflow-hidden"
+                                                            style="
+                                                                height:180px;
+                                                                background:#f6f7f9;
+                                                                @if(!empty($fixedBg))
+                                                                    background-image:url('{{ $fixedBg }}');
+                                                                    background-position:center;
+                                                                    background-size:cover;
+                                                                    background-repeat:no-repeat;
+                                                                @endif
+                                                            ">
+
+                                                            {{-- Overlay para legibilidad (solo si hay imagen) --}}
+                                                            @if(!empty($fixedBg))
+                                                                <div class="position-absolute top-0 start-0 w-100 h-100"
+                                                                    style="background:rgba(0,0,0,.35);"></div>
+                                                            @endif
+
+                                                            <div class="text-center px-3 position-relative" style="z-index:1;">
+                                                                <div class="fw-semibold {{ !empty($fixedBg) ? 'text-white' : 'text-dark' }}">
+                                                                    {{ $title }}
+                                                                </div>
+
+                                                                <small class="{{ !empty($fixedBg) ? 'text-white-50' : 'text-muted' }}">
+                                                                    WP ID: {{ $id }}
+                                                                </small>
+
                                                                 @if($jsonPath)
                                                                     <div class="mt-1">
-                                                                        <small class="text-muted">Guardará: {{ $jsonPath }}</small>
+                                                                        <small class="{{ !empty($fixedBg) ? 'text-white-50' : 'text-muted' }}">
+                                                                            Guardará: {{ $jsonPath }}
+                                                                        </small>
                                                                     </div>
                                                                 @else
                                                                     <div class="mt-1">
-                                                                        <small class="text-warning">Sin mapeo a JSON</small>
+                                                                        <small class="{{ !empty($fixedBg) ? 'text-warning' : 'text-warning' }}">
+                                                                            Sin mapeo a JSON
+                                                                        </small>
                                                                     </div>
                                                                 @endif
                                                             </div>
