@@ -70,17 +70,23 @@
                                 {{-- ============================================
                                    PLANTILLAS (WP) -> Guarda elementor_template_path
                                    ============================================ --}}
-                                @php
+                               @php
                                     $wpBase = 'https://testingseo.entornodedesarrollo.es';
                                     $secret = env('TSEO_TPL_SECRET');
 
-                                    // ✅ TU MAPA (ID WP -> PATH JSON en Laravel)
-                                    // Cambia esto cuando quieras
                                     $wpIdToJsonPath = [
-                                        // 196 => 'elementor/elementor-10.json',
-                                         179 => 'elementor/elementor-10.json',
-                                         130 => 'elementor/elementor-idei.json',
-                                    ]; 
+                                        179 => 'elementor/elementor-10.json',
+                                        130 => 'elementor/elementor-idei.json',
+                                    ];
+
+                                    // ✅ NUEVO MAPA: ID WP -> imagen
+                                    $wpIdToBg = [
+                                     
+                                        130 => asset('assets/images/PRUEBA.png'),
+                                    ];
+
+                                    // Imagen por defecto (si no hay en el mapa)
+                                    $defaultBg = asset('assets/images/tpls/default.png');
 
                                     $selectedPath = old('elementor_template_path', $dominio->elementor_template_path ?? '');
                                 @endphp
@@ -118,8 +124,8 @@
                                                     <div class="tpl-card border radius-12 overflow-hidden bg-white {{ $isSelected ? 'tpl-selected' : '' }}">
                                                         {{-- Miniatura genérica (solo imagen visual) --}}
                                                        @php
-                                                        $fixedBg = asset('assets/images/PRUEBA.png'); // ✅ correcto
-                                                    @endphp
+                                                            $fixedBg = $wpIdToBg[$id] ?? null; // ✅ si no existe, queda gris
+                                                        @endphp
 
 
                                                         <div class="d-flex align-items-center justify-content-center position-relative overflow-hidden"
