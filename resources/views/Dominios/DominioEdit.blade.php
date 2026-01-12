@@ -117,13 +117,10 @@
                                                 <div class="col-md-6">
                                                     <div class="tpl-card border radius-12 overflow-hidden bg-white {{ $isSelected ? 'tpl-selected' : '' }}">
                                                         {{-- Miniatura genérica (solo imagen visual) --}}
-                                                        @php
-                                                            // Imagen fija (si no existe o no quieres usarla, pon null)
-                                                            $fixedBg = asset('images/PRUEBA.png');
+                                                       @php
+                                                        $fixedBg = asset('assets/images/PRUEBA.png'); // ✅ correcto
+                                                    @endphp
 
-                                                            // Si quieres forzar "sin imagen" en algún momento:
-                                                            // $fixedBg = null;
-                                                        @endphp
 
                                                         <div class="d-flex align-items-center justify-content-center position-relative overflow-hidden"
                                                             style="
