@@ -83,6 +83,7 @@
                                     $wpIdToBg = [
                                      
                                         130 => asset('assets/images/PRUEBA.png'),
+                                          179 => asset('assets/images/Plantilla Nueva.png'),
                                     ];
 
                                     // Imagen por defecto (si no hay en el mapa)
