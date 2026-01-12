@@ -77,6 +77,7 @@
                                     $wpIdToJsonPath = [
                                         179 => 'elementor/elementor-10.json',
                                         130 => 'elementor/elementor-idei.json',
+                                        265 => 'elementor/elementor-nueva.json',
                                     ];
 
                                     // ✅ NUEVO MAPA: ID WP -> imagen
