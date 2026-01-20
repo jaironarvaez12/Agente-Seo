@@ -39,9 +39,24 @@
           <button type="submit"
               title="GENERAR"
               class="btn btn-primary text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2">
-              Generar
+              Generar Contenido
           </button>
           </form>
+
+
+
+      <form action="{{ route('dominios.reporte_seo.generar', $dominio->id_dominio) }}" method="POST" style="display:inline;">
+        @csrf
+        <button type="submit" class="btn btn-danger text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2">
+          Generar Reporte SEO 
+        </button>
+      </form>
+
+      <a href="{{ route('dominios.reporte_seo.ver', $dominio->id_dominio) }}"
+        class="btn btn-outline-danger text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2">
+       Ver Reporte Generado
+      </a>
+
     </div>
     </div>
 

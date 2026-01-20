@@ -47,4 +47,14 @@ return [
     'url' => env('TESTINGSEO_WP_URL', 'https://testingseo.entornodedesarrollo.es'),
     'secret' => env('TSEO_TPL_SECRET'),
 ],
+'moz' => [
+    'token' => env('MOZ_TOKEN'),
+    'base_url' => env('MOZ_BASE_URL', 'https://lsapi.seomoz.com/v2'),
+],
+'pagespeed' => [
+  'key' => env('PAGESPEED_API_KEY'),
+],
+'quickchart' => [
+    'base' => env('QUICKCHART_BASE', 'https://quickchart.io'),
+],
 ];

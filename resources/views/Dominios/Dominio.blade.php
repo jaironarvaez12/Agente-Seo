@@ -72,14 +72,14 @@
                                         
                                         <!-- Editar -->
                                        
-                                        {{-- <a href="{{ route('dominios.edit', $perfil->id_dominio) }}" 
+                                        <a href="{{ route('dominios.edit', $perfil->id_dominio) }}" 
                                             title="Editar"
                                             class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px 
                                                 d-flex justify-content-center align-items-center rounded-circle">
                                             <iconify-icon icon="lucide:edit" class="menu-icon"></iconify-icon>
-                                        </a> --}}
+                                        </a>
                                         <a href="{{ route('dominios.show', $perfil->id_dominio) }}" 
-                                            title="Editar"
+                                            title="Ver"
                                             class="bg-info-focus text-info-600 bg-hover-info-200 fw-medium w-40-px h-40-px 
                                                 d-flex justify-content-center align-items-center rounded-circle">
                                             <iconify-icon icon="majesticons:eye-line" class="menu-icon"></iconify-icon>

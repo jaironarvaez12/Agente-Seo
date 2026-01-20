@@ -72,9 +72,24 @@ Route::post('dominios/{dominio}/contenido/{detalle}/publicar', [App\Http\Control
     //PERFILES
     Route::resource('perfiles','App\Http\Controllers\PerfilesController');
   
+    //reporte seo
+  Route::prefix('dominios/{id_dominio}')->group(function () {
+    Route::post('/reporte-seo', [App\Http\Controllers\SeoReportController::class, 'generar'])
+        ->name('dominios.reporte_seo.generar');
 
-
+    Route::get('/reporte-seo', [App\Http\Controllers\SeoReportController::class, 'ver'])
+        ->name('dominios.reporte_seo.ver');
 });
+
+    Route::get('dominiosreportes/{id_dominio}', [App\Http\Controllers\DominiosController::class, 'ReportesDominio'])->name('dominiosreportes');
+    Route::get('dominiosreportefecha/{id_dominio}/{id_reporte}', [App\Http\Controllers\SeoReportController::class, 'ReportesDominio'])->name('dominiosreportefecha');
+   
+    Route::get('/dominios/{id_dominio}/reporte-seo/pdf', [App\Http\Controllers\SeoReportController::class, 'pdf'])
+    ->name('dominios.reporte_seo.pdf');
+
+    Route::get('dominiosreportepdf/{id_dominio}/{id_reporte}', [App\Http\Controllers\SeoReportController::class, 'Reportepdf'])->name('dominiosreportepdf');
+    
+    });
 
 
     Route::view('/politica-de-privacidad', 'legal.politica-privacidad')->name('politica.privacidad');

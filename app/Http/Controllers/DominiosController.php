@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Dominios_ContenidoModel;
 use App\Models\Dominios_Contenido_DetallesModel;
 use App\Models\DominiosModel;
+use App\Models\SeoReport;
 use Illuminate\Http\Request;
 use Exception;
 use Carbon\Carbon;
@@ -17,6 +18,8 @@ use Illuminate\Support\Facades\Http;
 use App\Jobs\GenerarContenidoKeywordJob;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\File;
+use Intervention\Image\Laravel\Facades\Image; 
 class DominiosController extends Controller
 {
     /**
@@ -116,10 +119,53 @@ class DominiosController extends Controller
     /**
      * Update the specified resource in storage.
      */
-   public function update(Request $request, string $id)
+   public function update(Request $request, string $id_dominio)
     {
+         if ($request->hasFile('imagen'))
+        {   
+            $PosseDocumentos = 'SI';
+        }
+        else
+        {
+            $PosseDocumentos = 'NO';
+            }
+        try 
+         {
+         $destino = "images/dominios/dominio/";
+             $NombreCarpeta = $id_dominio;
+             
+             $Ruta = public_path($destino . $NombreCarpeta);
+
+             if (!File::exists($Ruta)) 
+             {
+                 File::makeDirectory($Ruta, 0777, true);
+                 echo "La carpeta se ha creado correctamente.";
+             } 
+
+             //prueba
+             if ($PosseDocumentos === 'SI') {
+                $archivo      = $request->file('imagen');      // name="imagen"
+                $NombreImagen = $id_dominio . '.jpg';
+
+                // Mover al destino final
+                $archivo->move($Ruta, $NombreImagen);
+
+                // Redimensionar y sobrescribir (400x400, JPG calidad 85)
+                $RutaImagen = $Ruta . DIRECTORY_SEPARATOR . $NombreImagen;
+                $img   = Image::read($RutaImagen)->cover(400, 400);
+                $bytes = $img->encodeByExtension('jpg', quality: 85);
+                File::put($RutaImagen, $bytes);
+            }
+ 
+         } 
+         catch (Exception $ex) 
+         {
+             return back()->withError('Ocurrio Un Error al Cargar La Fotografia: ' . $ex->getMessage())->withInput();
+         }
+
+
         try {
-            $dominios = DominiosModel::findOrFail($id);
+            $dominios = DominiosModel::findOrFail($id_dominio);
 
             // (Opcional pero recomendado)
             $request->validate([
@@ -133,6 +179,11 @@ class DominiosController extends Controller
                 'elementor_template_path' => $request->input('elementor_template_path'), // 👈 NUEVO
             ]);
 
+             // solo si SÍ posee documentos (y tienes el nombre de la imagen) seteas la imagen
+            if ($PosseDocumentos === 'SI' && !empty($NombreImagen)) {
+                $dominios->imagen = $destino . $NombreCarpeta . '/' . $NombreImagen;
+            }
+
             if ($request->filled('password')) {
                 $dominios->password = Crypt::encryptString($request->input('password'));
             }
@@ -145,7 +196,7 @@ class DominiosController extends Controller
                 ->withInput();
         }
 
-        return redirect()->route('dominios.edit', $id)->withSuccess('El Dominio Se Ha Actualizado Exitosamente');
+        return redirect()->route('dominios.edit', $id_dominio)->withSuccess('El Dominio Se Ha Actualizado Exitosamente');
     }
 
     /**
@@ -155,22 +206,23 @@ class DominiosController extends Controller
     {
         //
     }
-public function Crearcontenido(string $IdDominio)
-{
-    // Tipos permitidos
-    $tiposPermitidos = ['POST', 'PAGINAS'];
+    public function Crearcontenido(string $IdDominio)
+    {
+        // Tipos permitidos
+        $tiposPermitidos = ['POST', 'PAGINAS'];
 
-    // Tipos que ya existen para ese dominio
-    $tiposExistentes = Dominios_ContenidoModel::where('id_dominio', $IdDominio)
-        ->pluck('tipo')            // trae solo la columna tipo
-        ->map(fn($t) => strtoupper(trim($t)))
-        ->toArray();
+        // Tipos que ya existen para ese dominio
+        $tiposExistentes = Dominios_ContenidoModel::where('id_dominio', $IdDominio)
+            ->pluck('tipo')            // trae solo la columna tipo
+            ->map(fn($t) => strtoupper(trim($t)))
+            ->toArray();
 
-    // Tipos faltantes (los que NO tiene aún)
-    $tiposDisponibles = array_values(array_diff($tiposPermitidos, $tiposExistentes));
+        // Tipos faltantes (los que NO tiene aún)
+        $tiposDisponibles = array_values(array_diff($tiposPermitidos, $tiposExistentes));
 
-    return view('Dominios.DominioCrearContenido', compact('IdDominio', 'tiposDisponibles'));
-}
+        return view('Dominios.DominioCrearContenido', compact('IdDominio', 'tiposDisponibles'));
+    }
+    
     public function GeneradorContenido(Request $request,string  $IdDominio)
     {
         $palabras = json_decode($request['palabras_clave']); // ["seo","paginas"]
@@ -894,4 +946,22 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
         return back()->with('error', 'Error programando en WordPress: ' . $e->getMessage());
     }
 }
+
+
+
+    public function ReportesDominio($id_dominio)
+    {
+        $dominio = DominiosModel::find($id_dominio);
+
+        $reportes = SeoReport::where('id_dominio', $dominio->id_dominio)->orderBy('id')->get();
+
+     
+
+        
+
+        return view('Dominios.DominiosReportes', compact('dominio', 'reportes'));
+    }
+
+
+
 }

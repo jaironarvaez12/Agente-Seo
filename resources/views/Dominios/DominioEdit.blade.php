@@ -30,7 +30,7 @@
                     <div class="card border">
                         <div class="card-body">
 
-                            <form method="POST" action="{{ route('dominios.update', $dominio->id_dominio) }}">
+                            <form method="POST" action="{{ route('dominios.update', $dominio->id_dominio) }}" enctype="multipart/form-data">
                                 @csrf
                                 @method('put')
 
@@ -50,7 +50,40 @@
                                     <textarea class="form-control radius-8" id="url" name="url" readonly
                                               rows="2" placeholder="https://ideiweb.com/">{{ old('url', $dominio->url ?? '') }}</textarea>
                                 </div>
+                                <!-- Upload Image Start -->
+                            <div class="mb-24 mt-16">
+                                 <label for="url" class="form-label fw-semibold text-primary-light text-sm mb-8">
+                                        Logo 
+                                    </label>
+                                <div class="avatar-upload">
+                                   <div class="avatar-edit position-absolute bottom-0 end-0 me-24 mt-16 z-1 cursor-pointer">
+                                        <input type='file' id="imagen" name="imagen" accept=".png, .jpg, .jpeg" hidden >
+                                        <label for="imagen" class="w-32-px h-32-px d-flex justify-content-center align-items-center bg-primary-50 text-primary-600 border border-primary-600 bg-hover-primary-100 text-lg rounded-circle">
+                                            <iconify-icon icon="solar:camera-outline" class="icon"></iconify-icon>
+                                        </label>
+                                    </div>
+                                    @php
+                                        $imgRel = $dominio->imagen ?? null;
+                                        $baseUrl = ($imgRel && file_exists(public_path($imgRel)))
+                                            ? asset($imgRel)
+                                            : asset('images/placeholder.jpg');
 
+                                        // ✅ Versión súper simple para evitar caché:
+                                        $imgUrl = $baseUrl . '?v=' . time();
+                                    @endphp
+
+                                    <div class="hover-scale-img border radius-16 overflow-hidden p-8" style="width:160px;">
+                                        <a href="{{ $imgUrl }}" class="popup-img w-100 h-100 d-flex radius-12 overflow-hidden">
+                                            <img id="avatar-img"
+                                                src="{{ $imgUrl }}"
+                                                alt="Imagen"
+                                                class="hover-scale-img__img w-100 h-100 object-fit-cover radius-12"
+                                                style="object-fit: cover; height:160px;">
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Upload Image End -->
                                 <div class="mb-20">
                                     <label for="usuario" class="form-label fw-semibold text-primary-light text-sm mb-8">
                                         Usuario<span class="text-danger-600">*</span>

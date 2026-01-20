@@ -18,7 +18,9 @@ class DominiosModel extends Model
     	'estatus',
         'usuario',
         'password',
-        'elementor_template_path'
+        'elementor_template_path',
+        'imagen',
+        'color',
     
 
     ];
