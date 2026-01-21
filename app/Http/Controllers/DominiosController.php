@@ -110,13 +110,13 @@ class DominiosController extends Controller
             ]);
 
         // 👇 DEBUG CLAVE
-        dd([
-            'url' => $res->effectiveUri() ?? null,
-            'status' => $res->status(),
-            'content_type' => $res->header('content-type'),
-            'body_snippet' => Str::limit($res->body(), 500),
-            'json' => $res->json(),
-        ]);
+        // dd([
+        //     'url' => $res->effectiveUri() ?? null,
+        //     'status' => $res->status(),
+        //     'content_type' => $res->header('content-type'),
+        //     'body_snippet' => Str::limit($res->body(), 500),
+        //     'json' => $res->json(),
+        // ]);
 
         if ($res->ok() && ($res->json('ok') === true)) {
             $plantillas = $res->json('items') ?? [];
