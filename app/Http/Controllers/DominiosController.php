@@ -22,6 +22,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Intervention\Image\Laravel\Facades\Image; 
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Str;
 class DominiosController extends Controller
 {
     /**
