@@ -123,8 +123,9 @@ class DominiosController extends Controller
     } catch (\Throwable $e) {
         dd(['exception' => $e->getMessage()]);
     }
+    }
 
-    re
+
 
 
     /**
