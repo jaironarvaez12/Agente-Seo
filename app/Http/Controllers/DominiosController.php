@@ -124,6 +124,7 @@ class DominiosController extends Controller
     } catch (\Throwable $e) {
         dd(['exception' => $e->getMessage()]);
     }
+     return view('Dominios.DominioEdit', compact('dominio', 'plantillas'));
     }
 
 
