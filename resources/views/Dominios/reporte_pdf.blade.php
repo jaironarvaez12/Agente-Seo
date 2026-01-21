@@ -5,6 +5,9 @@
   <title>Reporte SEO</title>
 
   <style>
+     :root{
+    --brand: {{ $dominio->color ?? '#487FFF' }};
+  }
     /* ====== DomPDF page box ====== */
     @page {
       margin: 35px 35px 70px 35px; /* bottom reservado para footer */
@@ -13,7 +16,7 @@
     body {
       font-family: DejaVu Sans, sans-serif;
       font-size: 12px;
-      color: #111;
+      color: var(--brand);
       margin: 0;
       padding: 0;
       /* colchón mínimo extra, sin exagerar */
@@ -89,7 +92,7 @@
       height: 28px;
 
       font-size: 10px;
-      color: #666;
+      color: var(--brand);
       border-top: 1px solid #ddd;
       padding-top: 6px;
       background: #fff; /* evita “texto por debajo” */
@@ -106,8 +109,8 @@
         <div class="title">Reporte SEO — {{ $dominio->nombre }}</div>
         <div class="subtitle muted">
           Dominio: <b>{{ $dominio->url }}</b><br>
-          Periodo: <b>{{ $report->period_start }}</b> a <b>{{ $report->period_end }}</b><br>
-          Report ID: <b>#{{ $report->id }}</b> — {{ $report->created_at }}
+          Periodo: <b>{{ date('d-m-Y', strtotime($report->period_start))}}</b> a <b>{{ date('d-m-Y', strtotime($report->period_end ))}}</b><br>
+          Report ID: <b>#{{ $report->id }}</b> — {{ date('d-m-Y h:i A', strtotime($report->created_at)) }}
         </div>
       </td>
 
@@ -118,7 +121,7 @@
   </table>
 
   {{-- Estado --}}
-  <div class="card">
+  {{-- <div class="card">
     <h2>Estado del reporte</h2>
     @php $st = $report->status; @endphp
 
@@ -135,7 +138,7 @@
         <b style="color:#9b1c1c;">Detalle:</b> {{ $report->error_message }}
       </div>
     @endif
-  </div>
+  </div> --}}
 
   {{-- MOZ LINKS --}}
   <div class="card">
@@ -428,9 +431,9 @@
   <table style="width:100%; border:none; border-collapse:collapse;" cellpadding="0" cellspacing="0">
     <tr style="border:none;">
       <td style="text-align:center; border:none;">
-        {{ $dominio->nombre }} | {{ $dominio->url }}
+        <b> {{ $dominio->nombre }} </b>
         <br>
-        ejeje
+         {{ $dominio->direccion }} 
       </td>
     </tr>
   </table>

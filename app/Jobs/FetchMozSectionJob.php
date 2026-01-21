@@ -19,7 +19,7 @@ class FetchMozSectionJob implements ShouldQueue
 
     public function __construct(
         public int $reportId,
-        public int $refDomainsMax = 100
+        public int $refDomainsMax = 10 // ✅ antes 50
     ) {}
 
     public function handle(MozClient $moz): void
@@ -31,8 +31,11 @@ class FetchMozSectionJob implements ShouldQueue
         $root = DomainNormalizer::rootDomainSimple($host);
         $today = now()->toDateString();
 
+        // ✅ hard cap de seguridad para no gastar cuota por accidente
+        $limit = min((int)$this->refDomainsMax, 10);
+
         try {
-            // 1) Snapshot url_metrics
+            // 1) Snapshot url_metrics (1 llamada)
             $urlMetrics = $moz->urlMetrics([$host]);
             $item = data_get($urlMetrics, 'results.0', []);
 
@@ -43,7 +46,7 @@ class FetchMozSectionJob implements ShouldQueue
             $backlinksTotal  = data_get($item, 'pages_to_root_domain');
             $refDomainsTotal = data_get($item, 'root_domains_to_root_domain');
 
-            // 2) Guardar snapshot diario
+            // 2) Guardar snapshot diario (tu BD)
             MozDailyMetric::updateOrCreate(
                 ['id_dominio' => $dominio->id_dominio, 'date' => $today],
                 [
@@ -57,10 +60,14 @@ class FetchMozSectionJob implements ShouldQueue
                 ]
             );
 
-            // 3) Serie diaria desde BD
+            // 3) Serie diaria desde BD (respeta el periodo del reporte)
+            $start = $report->period_start
+                ? \Carbon\Carbon::parse($report->period_start)->toDateString()
+                : now()->subDays(60)->toDateString();
+
             $snapshots = MozDailyMetric::query()
                 ->where('id_dominio', $dominio->id_dominio)
-                ->where('date', '>=', now()->subDays(60)->toDateString())
+                ->where('date', '>=', $start)
                 ->orderBy('date', 'asc')
                 ->get();
 
@@ -90,8 +97,21 @@ class FetchMozSectionJob implements ShouldQueue
                 $prev = $s;
             }
 
-            // 4) Ref domains smart: intenta linking_root_domains y si viene vacío, arma desde links
-            $refPack = $this->getRefDomainsSmart($moz, $host, $root);
+            // 4) Ref domains (Top 10) — 1 llamada como máximo
+            $refResp = $moz->linkingRootDomains(
+                target: $root,
+                targetScope: 'root_domain',
+                limit: $limit, // ✅ ahora 10 fijo (o menos si pasas <10)
+                nextToken: null,
+                filter: 'external',
+                sort: 'source_domain_authority'
+            );
+
+            $rows = data_get($refResp, 'results', []);
+            $refList = is_array($rows) ? $this->normalizeRefDomainsFromLRD($rows) : [];
+
+            // ✅ hard cap al guardar también
+            $refList = array_slice($refList, 0, $limit);
 
             // 5) Guardar sección MOZ
             SeoReportSection::updateOrCreate(
@@ -112,9 +132,9 @@ class FetchMozSectionJob implements ShouldQueue
                         'daily' => $daily,
                         'monthly' => [],
 
-                        'ref_domains_list' => $refPack['list'],
-                        'ref_domains_raw' => $refPack['raw'],
-                        'ref_domains_source' => $refPack['source'],
+                        'ref_domains_list' => $refList,
+                        'ref_domains_raw' => $refResp,
+                        'ref_domains_source' => 'linking_root_domains',
 
                         'raw' => $urlMetrics,
                     ],
@@ -140,64 +160,10 @@ class FetchMozSectionJob implements ShouldQueue
         }
     }
 
-    private function getRefDomainsSmart(MozClient $moz, string $host, string $root): array
-    {
-        $tries = [
-            // linking_root_domains
-            ['fn' => 'lrd', 'target' => $host,      'scope' => 'subdomain',   'filter' => 'external+nofollow'],
-            ['fn' => 'lrd', 'target' => $host,      'scope' => 'subdomain',   'filter' => 'external'],
-            ['fn' => 'lrd', 'target' => $root,      'scope' => 'root_domain', 'filter' => 'external+nofollow'],
-            ['fn' => 'lrd', 'target' => $root,      'scope' => 'root_domain', 'filter' => 'external'],
-
-            // links fallback (si arriba falla)
-            ['fn' => 'links', 'target' => $host, 'scope' => 'subdomain',   'filter' => 'external+nofollow'],
-            ['fn' => 'links', 'target' => $root, 'scope' => 'root_domain', 'filter' => 'external+nofollow'],
-            ['fn' => 'links', 'target' => $host . '/', 'scope' => 'page',  'filter' => 'external+nofollow'],
-        ];
-
-        foreach ($tries as $t) {
-            if ($t['fn'] === 'lrd') {
-                $resp = $moz->linkingRootDomains(
-                    target: $t['target'],
-                    targetScope: $t['scope'],
-                    limit: 50,
-                    nextToken: null,
-                    filter: $t['filter'],
-                    sort: 'source_domain_authority'
-                );
-
-                $rows = data_get($resp, 'results', []);
-                if (is_array($rows) && count($rows) > 0) {
-                    $list = $this->normalizeRefDomainsFromLRD($rows);
-                    if (count($list) > 0) {
-                        return ['list' => array_slice($list, 0, $this->refDomainsMax), 'raw' => $resp, 'source' => 'linking_root_domains'];
-                    }
-                }
-            } else {
-                $resp = $moz->links(
-                    target: $t['target'],
-                    targetScope: $t['scope'],
-                    limit: 50,
-                    nextToken: null,
-                    filter: $t['filter']
-                );
-
-                $rows = data_get($resp, 'results', []);
-                if (is_array($rows) && count($rows) > 0) {
-                    $list = $this->buildRefDomainsFromLinks($rows);
-                    if (count($list) > 0) {
-                        return ['list' => array_slice($list, 0, $this->refDomainsMax), 'raw' => $resp, 'source' => 'links_aggregated'];
-                    }
-                }
-            }
-        }
-
-        return ['list' => [], 'raw' => null, 'source' => 'none'];
-    }
-
     private function normalizeRefDomainsFromLRD(array $rows): array
     {
         $out = [];
+
         foreach ($rows as $r) {
             $domain =
                 $r['source_root_domain'] ??
@@ -207,12 +173,12 @@ class FetchMozSectionJob implements ShouldQueue
                 $r['source_domain'] ??
                 null;
 
-           $links =
-            $r['source_link_count'] ??
-            $r['link_count'] ??
-            $r['links'] ??
-            $r['pages'] ??
-            1; // ✅ si no viene conteo, al menos 1
+            $links =
+                $r['source_link_count'] ??
+                $r['link_count'] ??
+                $r['links'] ??
+                $r['pages'] ??
+                1;
 
             $da =
                 $r['source_domain_authority'] ??
@@ -232,44 +198,6 @@ class FetchMozSectionJob implements ShouldQueue
         }
 
         usort($out, fn($a,$b) => (int)($b['links'] ?? 0) <=> (int)($a['links'] ?? 0));
-
-        return $out;
-    }
-
-    private function buildRefDomainsFromLinks(array $linksRows): array
-    {
-        $map = [];
-
-        foreach ($linksRows as $lnk) {
-            $src =
-                $lnk['source_root_domain'] ??
-                $lnk['source_domain'] ??
-                $lnk['source'] ??
-                null;
-
-            if (!$src) continue;
-
-            if (!isset($map[$src])) {
-                $map[$src] = [
-                    'root_domain' => $src,
-                    'domain_authority' => $lnk['source_domain_authority'] ?? null,
-                    'spam_score' => $lnk['source_spam_score'] ?? null,
-                    'links' => 0,
-                    'raw' => [],
-                ];
-            }
-
-            $map[$src]['links']++;
-
-            // guarda 1 ejemplo por dominio para debug
-            if (count($map[$src]['raw']) < 1) {
-                $map[$src]['raw'][] = $lnk;
-            }
-        }
-
-        $out = array_values($map);
-        usort($out, fn($a,$b) => (int)$b['links'] <=> (int)$a['links']);
-
         return $out;
     }
 }

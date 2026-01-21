@@ -88,6 +88,8 @@ Route::post('dominios/{dominio}/contenido/{detalle}/publicar', [App\Http\Control
     ->name('dominios.reporte_seo.pdf');
 
     Route::get('dominiosreportepdf/{id_dominio}/{id_reporte}', [App\Http\Controllers\SeoReportController::class, 'Reportepdf'])->name('dominiosreportepdf');
+    Route::get('dominiosidentidad', [App\Http\Controllers\DominiosController::class, 'IdentidadDominios'])->name('dominiosidentidad');
+    Route::post('dominiosactualizaridentidad', [App\Http\Controllers\DominiosController::class, 'ActulizarIdentidadDominios'])->name('dominiosactualizaridentidad');
     
     });
 

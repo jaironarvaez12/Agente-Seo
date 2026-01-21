@@ -172,17 +172,27 @@
           </li> --}}
         </ul>
       </li>
-      <li>
+      {{-- <li>
         <a href="{{ route('perfiles.index') }}">
             <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
             <span>Perfiles</span>
         </a>
-      </li>
-      <li>
-        <a href="{{ route('dominios.index') }}">
-            <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
-            <span>Dominios</span>
+      </li> --}}
+     
+       <li class="dropdown">
+        <a href="javascript:void(0)">
+          <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
+          <span>Dominios</span>
         </a>
+        <ul class="sidebar-submenu">
+          <li>
+            <a href="{{ route('dominios.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Lista de Dominios</a>
+          </li>
+          <li>
+            <a href="{{ route('dominiosidentidad') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Identidad de Dominios</a>
+          </li>
+
+        </ul>
       </li>
 
  

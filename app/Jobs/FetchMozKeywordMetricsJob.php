@@ -8,6 +8,7 @@ use App\Services\MozJsonRpc;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -18,18 +19,25 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
     public int $tries = 1;
     public int $timeout = 180;
 
+    // ✅ fijo a España
+    private string $fixedLocale = 'es-ES';
+
     public function __construct(
         public int $reportId,
         public array $keywords,
         public string $device = 'desktop',
-        public string $engine = 'google'
+        public string $engine = 'google',
+        public int $maxKeywords = 15,      // ✅ baja esto si quieres ahorrar más (ej 10)
+        public int $cacheDays = 30         // ✅ cache para no re-consultar lo mismo
     ) {}
 
     public function handle(MozJsonRpc $moz): void
     {
         $report = SeoReport::findOrFail($this->reportId);
 
+        // ✅ normaliza + quita duplicados (incluye tildes)
         $keywords = $this->sanitizeKeywords($this->keywords);
+
         if (empty($keywords)) {
             SeoReportSection::updateOrCreate(
                 ['seo_report_id' => $report->id, 'section' => 'moz_keywords'],
@@ -41,120 +49,136 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
                         'engine' => $this->engine,
                         'rows' => [],
                         'no_data_count' => 0,
-                        'note' => 'No hay keywords configuradas en dominios_contenido',
+                        'note' => 'No hay keywords configuradas.',
+                        'locale' => $this->fixedLocale,
                     ],
                 ]
             );
             return;
         }
 
-        // Limita por cuota (ajusta si quieres)
-        $keywords = array_slice($keywords, 0, 25);
+        // ✅ límite real (para cuota)
+        $keywords = array_slice($keywords, 0, $this->maxKeywords);
 
         $rows = [];
         $noDataCount = 0;
-        $quotaStop = false;
 
         foreach ($keywords as $kw) {
-            $localesToTry = ['es-ES', 'es-MX', 'en-US'];
+            $cacheKey = $this->cacheKey($kw);
 
-            $metrics = null;
-            $usedLocale = null;
-            $tried = [];
-            $lastErr = null;
-
-            foreach ($localesToTry as $locale) {
-                $tried[] = $locale;
-
-                try {
-                    $result = $moz->keywordMetrics($kw, $locale, $this->device, $this->engine);
-                    $km = data_get($result, 'keyword_metrics', []);
-
-                    // ✅ si la respuesta existe pero TODO es null -> no sirve, intenta otro locale
-                    $allNull = true;
-                    foreach (['volume','difficulty','organic_ctr','priority'] as $field) {
-                        if (array_key_exists($field, $km) && $km[$field] !== null) {
-                            $allNull = false;
-                            break;
-                        }
-                    }
-
-                    if (is_array($km) && !$allNull) {
-                        $metrics = $km;
-                        $usedLocale = $locale;
-                        break;
-                    }
-
-                    // si llegó aquí es porque es todo null -> seguimos probando
-                    $lastErr = 'Moz devolvió métricas null (sin datos) para este locale.';
-                    continue;
-
-                } catch (Throwable $e) {
-                    $msg = $e->getMessage();
-                    $lastErr = $msg;
-
-                    // ✅ 404: no hay datos -> intenta siguiente locale
-                    if (str_contains($msg, 'No keyword metrics found')) {
-                        continue;
-                    }
-
-                    // ✅ sin cuota: detén todo (no gastes más)
-                    if (str_contains($msg, 'insufficient quota') || str_contains($msg, 'insufficient-quota')) {
-                        $quotaStop = true;
-                        break;
-                    }
-
-                    // otros errores: log y rompe para esta keyword, sigue con la siguiente
-                    Log::warning('Moz keyword metrics error', [
-                        'report_id' => $this->reportId,
-                        'keyword' => $kw,
-                        'locale' => $locale,
-                        'msg' => $msg,
-                    ]);
-                    break;
-                }
-            }
-
-            // ✅ si no hay cuota, guardamos sección como OK pero con nota (o error si prefieres)
-            if ($quotaStop) {
-                SeoReportSection::updateOrCreate(
-                    ['seo_report_id' => $report->id, 'section' => 'moz_keywords'],
-                    [
-                        'status' => 'error',
-                        'error_message' => 'Moz Keywords: sin cuota disponible en este periodo (Moz Search API / JSON-RPC).',
-                        'payload' => null,
-                    ]
-                );
-                return;
-            }
-
-            if (!$metrics) {
-                $noDataCount++;
-                $rows[] = [
+            // ✅ cache: evita gastar cuota si ya consultaste esta keyword recientemente
+            $cached = Cache::get($cacheKey);
+            if (is_array($cached)) {
+                $rows[] = $cached + [
                     'keyword' => $kw,
-                    'locale' => $usedLocale,
-                    'volume' => null,
-                    'difficulty' => null,
-                    'organic_ctr' => null,
-                    'priority' => null,
-                    'note' => 'Sin datos en Moz para esta keyword',
-                    'tried_locales' => $tried,
-                    'last_error' => $lastErr,
+                    'locale' => $this->fixedLocale,
+                    'cached' => true,
                 ];
                 continue;
             }
 
-            $rows[] = [
-                'keyword' => $kw,
-                'locale' => $usedLocale,
-                'volume' => $metrics['volume'] ?? null,
-                'difficulty' => $metrics['difficulty'] ?? null,
-                'organic_ctr' => $metrics['organic_ctr'] ?? null,
-                'priority' => $metrics['priority'] ?? null,
-                'note' => null,
-                'tried_locales' => $tried,
-                'last_error' => null,
-            ];
+            try {
+                $result = $moz->keywordMetrics($kw, $this->fixedLocale, $this->device, $this->engine);
+                $km = data_get($result, 'keyword_metrics', []);
+
+                // si viene vacío o todo null -> lo tratamos como "sin datos"
+                $allNull = true;
+                foreach (['volume','difficulty','organic_ctr','priority'] as $field) {
+                    if (array_key_exists($field, $km) && $km[$field] !== null) {
+                        $allNull = false;
+                        break;
+                    }
+                }
+
+                if (!is_array($km) || $allNull) {
+                    $noDataCount++;
+                    $row = [
+                        'keyword' => $kw,
+                        'locale' => $this->fixedLocale,
+                        'volume' => null,
+                        'difficulty' => null,
+                        'organic_ctr' => null,
+                        'priority' => null,
+                        'note' => 'Sin datos en Moz (respuesta vacía)',
+                        'cached' => false,
+                    ];
+                    $rows[] = $row;
+
+                    Cache::put($cacheKey, $row, now()->addDays($this->cacheDays));
+                    continue;
+                }
+
+                $row = [
+                    'keyword' => $kw,
+                    'locale' => $this->fixedLocale,
+                    'volume' => $km['volume'] ?? null,
+                    'difficulty' => $km['difficulty'] ?? null,
+                    'organic_ctr' => $km['organic_ctr'] ?? null,
+                    'priority' => $km['priority'] ?? null,
+                    'note' => null,
+                    'cached' => false,
+                ];
+
+                $rows[] = $row;
+                Cache::put($cacheKey, $row, now()->addDays($this->cacheDays));
+
+            } catch (Throwable $e) {
+                $msg = $e->getMessage();
+
+                // ✅ sin cuota: corta YA para no quemar más
+                if (str_contains($msg, 'insufficient quota') || str_contains($msg, 'insufficient-quota')) {
+                    SeoReportSection::updateOrCreate(
+                        ['seo_report_id' => $report->id, 'section' => 'moz_keywords'],
+                        [
+                            'status' => 'error',
+                            'error_message' => 'Moz Keywords: sin cuota disponible en este periodo.',
+                            'payload' => null,
+                        ]
+                    );
+                    return;
+                }
+
+                // ✅ 404 / no data: guarda fila sin datos (1 sola llamada, no reintenta otros locales)
+                if (str_contains($msg, 'No keyword metrics found') || str_contains($msg, '404')) {
+                    $noDataCount++;
+                    $row = [
+                        'keyword' => $kw,
+                        'locale' => $this->fixedLocale,
+                        'volume' => null,
+                        'difficulty' => null,
+                        'organic_ctr' => null,
+                        'priority' => null,
+                        'note' => 'Sin datos en Moz (404)',
+                        'last_error' => $msg,
+                        'cached' => false,
+                    ];
+                    $rows[] = $row;
+                    Cache::put($cacheKey, $row, now()->addDays($this->cacheDays));
+                    continue;
+                }
+
+                Log::warning('Moz keyword metrics error', [
+                    'report_id' => $this->reportId,
+                    'keyword' => $kw,
+                    'locale' => $this->fixedLocale,
+                    'msg' => $msg,
+                ]);
+
+                $noDataCount++;
+                $row = [
+                    'keyword' => $kw,
+                    'locale' => $this->fixedLocale,
+                    'volume' => null,
+                    'difficulty' => null,
+                    'organic_ctr' => null,
+                    'priority' => null,
+                    'note' => 'Error consultando Moz',
+                    'last_error' => $msg,
+                    'cached' => false,
+                ];
+                $rows[] = $row;
+                Cache::put($cacheKey, $row, now()->addDays(3));
+            }
         }
 
         SeoReportSection::updateOrCreate(
@@ -165,22 +189,52 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
                 'payload' => [
                     'device' => $this->device,
                     'engine' => $this->engine,
+                    'locale' => $this->fixedLocale,
                     'rows' => $rows,
                     'no_data_count' => $noDataCount,
+                    'max_keywords' => $this->maxKeywords,
+                    'cache_days' => $this->cacheDays,
                 ],
             ]
         );
     }
 
+    private function cacheKey(string $kw): string
+    {
+        $norm = $this->normalizeKey($kw);
+        return "moz_kw:{$this->device}:{$this->engine}:{$this->fixedLocale}:" . sha1($norm);
+    }
+
     private function sanitizeKeywords(array $keywords): array
     {
         $out = [];
+        $seen = [];
+
         foreach ($keywords as $k) {
             $k = trim((string) $k);
             if ($k === '') continue;
+
+            // corta largo
             $k = mb_substr($k, 0, 120);
+
+            // ✅ dedupe por clave normalizada (sin tildes, minúsculas, etc.)
+            $key = $this->normalizeKey($k);
+            if (isset($seen[$key])) continue;
+
+            $seen[$key] = true;
             $out[] = $k;
         }
-        return array_values(array_unique($out));
+
+        return array_values($out);
+    }
+
+    private function normalizeKey(string $s): string
+    {
+        $s = mb_strtolower($s);
+        // quita tildes
+        $s = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s) ?: $s;
+        // colapsa espacios
+        $s = preg_replace('/\s+/', ' ', $s);
+        return trim($s);
     }
 }

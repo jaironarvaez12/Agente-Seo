@@ -14,41 +14,58 @@ use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Str;
 use Barryvdh\DomPDF\Facade\Pdf;
 use App\Services\ChartImageService;
-
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
-
+use Illuminate\Http\Request; 
 class SeoReportController extends Controller
 {
-    public function generar($id_dominio)
+     public function generar(int $id,Request $request)
     {
-        $dominio = DominiosModel::findOrFail($id_dominio);
+        $dominio = DominiosModel::findOrFail($id);
+
+        $preset = $request->input('preset', 'last_30');
+
+        [$start, $end] = match ($preset) {
+            'prev_month' => [
+                now()->subMonthNoOverflow()->startOfMonth()->toDateString(),
+                now()->subMonthNoOverflow()->endOfMonth()->toDateString(),
+            ],
+            'last_3m' => [now()->subMonths(3)->toDateString(), now()->toDateString()],
+            'last_6m' => [now()->subMonths(6)->toDateString(), now()->toDateString()],
+            'custom' => [
+                $request->input('period_start')
+                    ? Carbon::parse($request->input('period_start'))->toDateString()
+                    : now()->subDays(30)->toDateString(),
+                $request->input('period_end')
+                    ? Carbon::parse($request->input('period_end'))->toDateString()
+                    : now()->toDateString(),
+            ],
+            default => [now()->subDays(30)->toDateString(), now()->toDateString()],
+        };
 
         $report = SeoReport::create([
             'id_dominio'   => $dominio->id_dominio,
-            'period_start' => now()->subDays(30)->toDateString(),
-            'period_end'   => now()->toDateString(),
+            'period_start' => $start,
+            'period_end'   => $end,
             'status'       => 'generando',
         ]);
 
-        // ✅ Cadena SOLO con secciones requeridas + finalize
+        // ✅ Cadena principal
         Bus::chain([
             (new FetchMozSectionJob($report->id))->onQueue('reports'),
             (new RunTechAuditSectionJob($report->id, 200))->onQueue('reports'),
             (new FinalizeSeoReportJob($report->id))->onQueue('reports'),
-        ])
-        ->catch(function (Throwable $e) use ($report) {
-            // por si algo explota fuera, intenta finalizar
+        ])->catch(function (\Throwable $e) use ($report) {
             FinalizeSeoReportJob::dispatch($report->id)->onQueue('reports');
-        })
-        ->dispatch();
+        })->dispatch();
 
-        // ✅ PageSpeed fuera (NO bloquea), en otra cola
+        // ✅ PageSpeed fuera
         FetchPageSpeedSectionJob::dispatch($report->id)
             ->onQueue('pagespeed')
             ->delay(now()->addSeconds(20));
 
-        // ✅ Keywords Moz fuera (NO bloquea) — usa tus keywords desde dominios_contenido
+        // ✅ Keywords fuera (usa tus keywords)
         $keywords = $this->keywordsFromDomain($dominio->id_dominio);
 
         FetchMozKeywordMetricsJob::dispatch($report->id, $keywords, 'desktop', 'google')
@@ -57,7 +74,7 @@ class SeoReportController extends Controller
 
         return redirect()
             ->route('dominios.reporte_seo.ver', $dominio->id_dominio)
-            ->with('success', 'Reporte SEO en generación. Recarga en unos momentos.');
+            ->with('success', "Reporte SEO en generación. Periodo: {$start} a {$end}.");
     }
 
     public function ver($id_dominio)
@@ -80,59 +97,51 @@ class SeoReportController extends Controller
      * ✅ AQUÍ ES DONDE LO CAMBIAS (se llama desde generar())
      * Lee dominios_contenido.palabras_claves y genera lista para Moz Keywords.
      */
-    private function keywordsFromDomain(int $idDominio): array
-    {
-        $generadores = Dominios_ContenidoModel::where('id_dominio', $idDominio)->get();
+    private function keywordsFromDomain(int $idDominio, int $limit = 15): array
+{
+    $generadores = Dominios_ContenidoModel::where('id_dominio', $idDominio)->get();
 
-        $keywords = [];
+    $keywords = [];
+    $seen = [];
 
-        // 1) Extraer keywords
-        foreach ($generadores as $g) {
-            $text = (string) ($g->palabras_claves ?? '');
-            if ($text === '') continue;
+    foreach ($generadores as $g) {
+        $text = trim((string)($g->palabras_claves ?? ''));
+        if ($text === '') continue;
 
-            // separa por coma, punto y coma, saltos de linea
-            $parts = preg_split('/[,;\n\r]+/u', $text);
-            foreach ($parts as $p) {
-                $p = trim($p);
-                if ($p !== '') $keywords[] = $p;
-            }
+        // separa por coma, punto y coma, saltos de línea y "|" (por si acaso)
+        $parts = preg_split('/[,;\n\r\|]+/u', $text);
+
+        foreach ($parts as $p) {
+            $p = trim($p);
+            if ($p === '') continue;
+
+            // ✅ normaliza espacios (evita "seo   " vs "seo")
+            $p = preg_replace('/\s+/u', ' ', $p);
+            $p = trim($p);
+
+            // ✅ opcional: evita keywords ultra cortas tipo "a", "de"
+            // if (mb_strlen($p) < 3) continue;
+
+            // ✅ dedupe fuerte: minúsculas + sin tildes
+            $key = $this->normalizeKeywordKey($p);
+            if (isset($seen[$key])) continue;
+
+            $seen[$key] = true;
+            $keywords[] = $p;
         }
-
-        // 2) Expandir variantes para mejorar chance de datos en Moz
-        $expanded = [];
-        foreach ($keywords as $k) {
-            $kTrim = trim($k);
-            if ($kTrim === '') continue;
-
-            $expanded[] = $kTrim;
-
-            $lower = mb_strtolower($kTrim);
-
-            // 🔥 tus casos reales
-            if ($lower === 'paginas web' || $lower === 'páginas web') {
-                $expanded[] = 'páginas web';
-                $expanded[] = 'paginas web';
-                $expanded[] = 'diseño web';
-                $expanded[] = 'desarrollo web';
-                $expanded[] = 'diseño de páginas web';
-                $expanded[] = 'creación de páginas web';
-            }
-
-            if ($lower === 'seo' || $lower === 'posicionamiento seo') {
-                $expanded[] = 'seo';
-                $expanded[] = 'posicionamiento seo';
-                $expanded[] = 'agencia seo';
-                $expanded[] = 'seo agency';
-            }
-        }
-
-        // 3) Únicas + límite por cuota
-        $expanded = array_values(array_unique($expanded));
-
-        // ⚠️ limita para no gastar cuota. (sube/baja esto a gusto)
-        return array_slice($expanded, 0, 15);
     }
+
+    // ✅ límite por cuota
+    return array_slice($keywords, 0, $limit);
+}
+
+private function normalizeKeywordKey(string $s): string
+{
+    $s = mb_strtolower($s);
+    $s = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s) ?: $s;
+    $s = preg_replace('/\s+/u', ' ', $s);
+    return trim($s);
+}
 public function pdf($id_dominio)
 {
     $dominio = DominiosModel::findOrFail($id_dominio);

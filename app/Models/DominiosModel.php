@@ -21,6 +21,7 @@ class DominiosModel extends Model
         'elementor_template_path',
         'imagen',
         'color',
+        'direccion'
     
 
     ];

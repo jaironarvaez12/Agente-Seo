@@ -36,8 +36,9 @@
   $monthly = collect(data_get($mozData, 'monthly', []))->take(-24);
 
   $refList = collect(data_get($mozData,'ref_domains_list', []))
-              ->filter(fn($x) => !empty($x['root_domain']))
-              ->take(100);
+              ->filter(fn($x) => !empty($x['root_domain']));
+
+  $refTopN = $refList->count(); // viene ya limitado desde el Job (10)
 
   $kwRows = collect(data_get($kwData, 'rows', []))->take(200);
 
@@ -63,10 +64,25 @@
     </div>
 
     <div class="d-flex align-items-center gap-2">
-      <form action="{{ route('dominios.reporte_seo.generar', $dominio->id_dominio) }}" method="POST" style="display:inline;">
-        @csrf
-        <button class="btn btn-danger btn-sm">Actualizar reporte</button>
-      </form>
+    <form action="{{ route('dominios.reporte_seo.generar', $dominio->id_dominio) }}"
+      method="POST"
+      class="d-flex gap-2 align-items-center"
+      style="display:inline-flex;">
+  @csrf
+
+  <select id="presetRange" name="preset" class="form-select form-select-sm" style="width: 190px;">
+    <option value="last_30">Últimos 30 días</option>
+    <option value="prev_month">Mes anterior</option>
+    <option value="last_3m">Hace 3 meses</option>
+    <option value="last_6m">Hace 6 meses</option>
+    <option value="custom">Personalizado</option>
+  </select>
+
+  <input id="periodStart" type="date" name="period_start" class="form-control form-control-sm" style="width: 160px;">
+  <input id="periodEnd" type="date" name="period_end" class="form-control form-control-sm" style="width: 160px;">
+
+  <button class="btn btn-danger btn-sm">Actualizar reporte</button>
+</form>
 
       <a href="{{ route('dominios.show', $dominio->id_dominio) }}" class="btn btn-secondary btn-sm">
         Volver
@@ -267,7 +283,7 @@
             </div>
           @endif
 
-          <h6 class="mt-16 mb-12">Dominios de referencia (Top)</h6>
+          <h6 class="mt-16 mb-12">Dominios de referencia (Top {{ $refTopN ?: 10 }})</h6>
           @if($refList->count())
             <div class="table-responsive">
               <table class="table bordered-table sm-table mb-0">
@@ -299,7 +315,7 @@
             </div>
           @endif
 
-          <details class="mt-12">
+          {{-- <details class="mt-12">
             <summary class="text-secondary-light">Ver JSON crudo (Ref Domains)</summary>
             <pre style="white-space: pre-wrap; max-height: 350px; overflow:auto;">{{ $safeJson(data_get($mozData,'ref_domains_raw')) }}</pre>
           </details>
@@ -307,7 +323,7 @@
           <details class="mt-12">
             <summary class="text-secondary-light">Ver JSON crudo (Moz url_metrics)</summary>
             <pre style="white-space: pre-wrap; max-height: 350px; overflow:auto;">{{ $safeJson(data_get($mozData,'raw')) }}</pre>
-          </details>
+          </details> --}}
         @endif
       </div>
     </div>
@@ -798,4 +814,26 @@
       }
     })();
   </script>
+  <script>
+  (function () {
+    const preset = document.getElementById('presetRange');
+    const start = document.getElementById('periodStart');
+    const end = document.getElementById('periodEnd');
+
+    function sync() {
+      const isCustom = preset.value === 'custom';
+      start.style.display = isCustom ? '' : 'none';
+      end.style.display = isCustom ? '' : 'none';
+
+      // si no es custom, limpia para no mandar basura
+      if (!isCustom) {
+        start.value = '';
+        end.value = '';
+      }
+    }
+
+    preset.addEventListener('change', sync);
+    sync();
+  })();
+</script>
 @endsection

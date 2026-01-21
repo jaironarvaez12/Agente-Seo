@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Dominios_ContenidoModel;
 use App\Models\Dominios_Contenido_DetallesModel;
 use App\Models\DominiosModel;
+use App\Models\Dominios_UsuariosModel;
 use App\Models\SeoReport;
 use Illuminate\Http\Request;
 use Exception;
@@ -20,6 +21,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Intervention\Image\Laravel\Facades\Image; 
+use Illuminate\Support\Facades\Auth;
 class DominiosController extends Controller
 {
     /**
@@ -961,6 +963,77 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
 
         return view('Dominios.DominiosReportes', compact('dominio', 'reportes'));
     }
+    public function IdentidadDominios()
+    {
+        $dominios= Dominios_UsuariosModel::Dominios(Auth::user()->id);
+        
+
+        return view('Dominios.DominioIdentidad', compact('dominios'));
+    }
+    public function ActulizarIdentidadDominios(Request $request)
+    {
+        $request->validate([
+            'dominios'    => 'required|array',
+            'dominios.*'  => 'required|integer',
+            'imagen'      => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
+            'color_texto' => 'nullable|string',
+        ]);
+
+        $dominioIds  = $request->input('dominios', []);
+        $tieneImagen = $request->hasFile('imagen');
+
+        // ✅ Preparamos la imagen UNA SOLA VEZ para reusarla en todos los dominios
+        $jpgBytes = null;
+        if ($tieneImagen) {
+            $file = $request->file('imagen');
+
+            if (!$file->isValid()) {
+                return back()->withError('Upload falló: ' . $file->getErrorMessage())->withInput();
+            }
+
+            $img = Image::read($file->getRealPath())->cover(400, 400);
+            $jpgBytes = $img->encodeByExtension('jpg', quality: 85);
+        }
+
+        foreach ($dominioIds as $idDominio) {
+            try {
+                $destino = "images/dominios/dominio/";
+                $carpeta = $idDominio;
+
+                $rutaCarpeta = public_path($destino . $carpeta);
+
+                if (!File::exists($rutaCarpeta)) {
+                    File::makeDirectory($rutaCarpeta, 0777, true);
+                }
+
+                // ✅ Guardar imagen (si viene) sin mover el archivo original
+                $nombreImagen = null;
+                if ($tieneImagen && $jpgBytes) {
+                    $nombreImagen = $idDominio . '.jpg';
+                    $rutaImagen = $rutaCarpeta . DIRECTORY_SEPARATOR . $nombreImagen;
+                    File::put($rutaImagen, $jpgBytes);
+                }
+
+                // Actualizar BD
+                $dominioModel = DominiosModel::findOrFail($idDominio);
+                $dominioModel->color = $request->input('color_texto');
+                $dominioModel->direccion = $request->input('nombre');
+
+                if ($tieneImagen && $nombreImagen) {
+                    $dominioModel->imagen = $destino . $carpeta . '/' . $nombreImagen;
+                }
+
+                $dominioModel->save();
+
+            } catch (\Exception $ex) {
+                return back()->withError('Ocurrió un error al actualizar el dominio ID ' . $idDominio . ': ' . $ex->getMessage())->withInput();
+            }
+        }
+
+        return redirect()->route('dominiosidentidad')->withSuccess('Los dominios se han actualizado exitosamente');
+    }
+
+
 
 
 
