@@ -93,6 +93,8 @@ class DominiosController extends Controller
     $wpBase = 'https://testingseo.entornodedesarrollo.es';
     $secret = env('TSEO_TPL_SECRET');
 
+    dd($secret);
+
     $plantillas = [];
 
     try {
