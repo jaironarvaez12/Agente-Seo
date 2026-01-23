@@ -601,169 +601,235 @@ public function verWp($id, WordpressService $wp)
 
 
 
-public function Generador(string $IdDominio, LicenseService $licenses)
-{
-    $user = auth()->user();
-    if (!$user) return back()->withError('Debes iniciar sesión.');
+    public function Generador(string $IdDominio, LicenseService $licenses)
+    {
+        $user = auth()->user();
+        if (!$user) return back()->withError('Debes iniciar sesión.');
 
-    $licensePlain = $user->getLicenseKeyPlain();
-    if (!$licensePlain) return back()->withError('No tienes licencia registrada.');
+        $licensePlain = $user->getLicenseKeyPlain();
+        if (!$licensePlain) return back()->withError('No tienes licencia registrada.');
 
-    $jobsToDispatch = [];
-    $msg = null;
-    $ok = false;
+        $jobsToDispatch = [];
+        $msg = null;
+        $ok = false;
 
-    try {
-        [$ok, $msg, $jobsToDispatch] = DB::transaction(function () use ($IdDominio, $licenses, $licensePlain, $user) {
+        try {
+            [$ok, $msg, $jobsToDispatch] = DB::transaction(function () use ($IdDominio, $licenses, $licensePlain, $user) {
 
-            $dominio = DominiosModel::where('id_dominio', (int)$IdDominio)
-                ->lockForUpdate()
-                ->first();
+                // ✅ Lock de dominio para evitar doble click simultáneo
+                $dominio = DominiosModel::where('id_dominio', (int)$IdDominio)
+                    ->lockForUpdate()
+                    ->first();
 
-            if (!$dominio) {
-                return [false, 'Dominio no encontrado.', []];
-            }
-
-            $host = $this->hostFromUrl($dominio->url);
-
-            $planResp = $licenses->getPlanLimitsCached($licensePlain, $host, $user->email, true);
-            $plan   = (string) ($planResp['plan'] ?? 'free');
-            $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
-            $maxContent = (int) ($limits['max_content'] ?? 0);
-
-            if ($maxContent <= 0) {
-                return [false, "Tu plan ($plan) no permite generar contenido o el dominio no está activado.", []];
-            }
-
-            $desde = Carbon::create(2026, 1, 20, 0, 0, 0);
-
-            $ocupados = (int) Dominios_Contenido_DetallesModel::where('id_dominio', (int)$IdDominio)
-                ->whereIn('tipo', ['post','page'])
-                ->where('created_at', '>=', $desde)
-                ->whereIn('estatus', ['encolado','en_proceso','generado'])
-                ->count();
-
-            if ($ocupados >= $maxContent) {
-                return [false, "Límite alcanzado: $ocupados / $maxContent desde 20/01/2026 (plan $plan).", []];
-            }
-
-            $remaining = $maxContent - $ocupados;
-
-            $configs = Dominios_ContenidoModel::select('id_dominio_contenido','tipo','palabras_claves')
-                ->where('id_dominio', (int)$IdDominio)
-                ->orderByDesc('id_dominio_contenido')
-                ->get();
-
-            if ($configs->isEmpty()) {
-                return [false, 'No hay configuración para este dominio.', []];
-            }
-
-            $configs = $configs->map(function ($c) {
-                $tipoRaw = strtolower(trim((string)$c->tipo));
-                $tipo = match ($tipoRaw) {
-                    'post', 'posts' => 'post',
-                    'page', 'pagina', 'página', 'paginas', 'páginas' => 'page',
-                    default => null,
-                };
-                $c->tipo_normalizado = $tipo;
-                return $c;
-            })->filter(fn($c) => in_array($c->tipo_normalizado, ['post','page'], true));
-
-            if ($configs->isEmpty()) {
-                return [false, 'No hay configuraciones válidas (post/page) para este dominio.', []];
-            }
-
-            // 3) construir tareas (AQUÍ NO FILTRAMOS keywords, porque SÍ pueden repetirse)
-            $tareas = [];
-            foreach ($configs as $config) {
-                $tipo = $config->tipo_normalizado;
-
-                $raw = (string)$config->palabras_claves;
-                $palabras = json_decode($raw, true);
-                if (!is_array($palabras)) {
-                    $palabras = array_values(array_filter(array_map('trim', explode(',', $raw))));
+                if (!$dominio) {
+                    return [false, 'Dominio no encontrado.', []];
                 }
-                if (!$palabras) continue;
 
-                $palabras = array_slice($palabras, 0, 5);
+                $host = $this->hostFromUrl($dominio->url);
 
-                foreach ($palabras as $kw) {
-                    $kw = trim((string)$kw);
-                    if ($kw === '') continue;
+                // ✅ límites API (fresh)
+                $planResp = $licenses->getPlanLimitsCached($licensePlain, $host, $user->email, true);
+                $plan   = (string) ($planResp['plan'] ?? 'free');
+                $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
 
-                    $tareas[] = [
-                        'id_dominio_contenido' => (int)$config->id_dominio_contenido,
-                        'tipo' => (string)$tipo,
-                        'keyword' => $kw,
+                $maxContent = (int) ($limits['max_content'] ?? 0);
+                if ($maxContent <= 0) {
+                    return [false, "Tu plan ($plan) no permite generar contenido o el dominio no está activado.", []];
+                }
+
+                // ✅ max dominios activos (ej: 3)
+                $maxActiveDomains = (int) ($limits['max_active_domains'] ?? ($limits['max_domains'] ?? 0));
+                if ($maxActiveDomains <= 0) {
+                    // fallback si no viene (o puedes devolver error)
+                    $maxActiveDomains = 1;
+                }
+
+                $desde = Carbon::create(2026, 1, 20, 0, 0, 0);
+
+                // =========================================================
+                // 1) CUPO POR DOMINIO (12)
+                // =========================================================
+                $ocupadosDominio = (int) Dominios_Contenido_DetallesModel::where('id_dominio', (int)$IdDominio)
+                    ->whereIn('tipo', ['post','page'])
+                    ->where('created_at', '>=', $desde)
+                    ->whereIn('estatus', ['encolado','en_proceso','generado'])
+                    ->count();
+
+                if ($ocupadosDominio >= $maxContent) {
+                    return [false, "Límite por dominio alcanzado: $ocupadosDominio / $maxContent desde 20/01/2026 (plan $plan).", []];
+                }
+
+                $remainingDominio = $maxContent - $ocupadosDominio;
+
+                // =========================================================
+                // 2) CUPO GLOBAL (3 * 12 = 36) usando tabla pivote dominios_usuario
+                // =========================================================
+                $maxGlobal = $maxActiveDomains * $maxContent;
+
+                // ⚠️ AJUSTA nombres si tu tabla/columnas difieren
+                $dominiosIdsDelUser = DB::table('dominios_usuarios')
+                    ->where('id_usuario', (int)$user->id)     // <-- si es id_usuario, cámbialo aquí
+                    ->pluck('id_dominio')                  // <-- si es dominio_id, cámbialo aquí
+                    ->map(fn($v) => (int)$v)
+                    ->all();
+
+                // Si por alguna razón el dominio actual no aparece en la pivote, lo incluimos
+                // (para no permitir "generar" en dominios que no pertenecen al user)
+                if (!in_array((int)$IdDominio, $dominiosIdsDelUser, true)) {
+                    // ✅ mejor bloquear; evita que generen en un dominio ajeno
+                    return [false, 'No tienes permiso para generar contenido en este dominio.', []];
+                }
+
+                $ocupadosGlobal = (int) Dominios_Contenido_DetallesModel::whereIn('id_dominio', $dominiosIdsDelUser)
+                    ->whereIn('tipo', ['post','page'])
+                    ->where('created_at', '>=', $desde)
+                    ->whereIn('estatus', ['encolado','en_proceso','generado'])
+                    ->count();
+
+                if ($ocupadosGlobal >= $maxGlobal) {
+                    return [false, "Límite GLOBAL alcanzado: $ocupadosGlobal / $maxGlobal (= $maxActiveDomains dominios x $maxContent) desde 20/01/2026 (plan $plan).", []];
+                }
+
+                $remainingGlobal = $maxGlobal - $ocupadosGlobal;
+
+                // ✅ remaining final: respeta ambos límites
+                $remaining = min($remainingDominio, $remainingGlobal);
+
+                if ($remaining <= 0) {
+                    return [false, "No hay cupo disponible. Dominio: $ocupadosDominio/$maxContent. Global: $ocupadosGlobal/$maxGlobal.", []];
+                }
+
+                // =========================================================
+                // 3) configs
+                // =========================================================
+                $configs = Dominios_ContenidoModel::select('id_dominio_contenido','tipo','palabras_claves')
+                    ->where('id_dominio', (int)$IdDominio)
+                    ->orderByDesc('id_dominio_contenido')
+                    ->get();
+
+                if ($configs->isEmpty()) {
+                    return [false, 'No hay configuración para este dominio.', []];
+                }
+
+                $configs = $configs->map(function ($c) {
+                    $tipoRaw = strtolower(trim((string)$c->tipo));
+                    $tipo = match ($tipoRaw) {
+                        'post', 'posts' => 'post',
+                        'page', 'pagina', 'página', 'paginas', 'páginas' => 'page',
+                        default => null,
+                    };
+                    $c->tipo_normalizado = $tipo;
+                    return $c;
+                })->filter(fn($c) => in_array($c->tipo_normalizado, ['post','page'], true));
+
+                if ($configs->isEmpty()) {
+                    return [false, 'No hay configuraciones válidas (post/page) para este dominio.', []];
+                }
+
+                // =========================================================
+                // 4) construir tareas (keywords pueden repetirse)
+                // =========================================================
+                $tareas = [];
+                foreach ($configs as $config) {
+                    $tipo = $config->tipo_normalizado;
+
+                    $raw = (string)$config->palabras_claves;
+                    $palabras = json_decode($raw, true);
+                    if (!is_array($palabras)) {
+                        $palabras = array_values(array_filter(array_map('trim', explode(',', $raw))));
+                    }
+                    if (!$palabras) continue;
+
+                    $palabras = array_slice($palabras, 0, 5);
+
+                    foreach ($palabras as $kw) {
+                        $kw = trim((string)$kw);
+                        if ($kw === '') continue;
+
+                        $tareas[] = [
+                            'id_dominio_contenido' => (int)$config->id_dominio_contenido,
+                            'tipo' => (string)$tipo,
+                            'keyword' => $kw,
+                        ];
+                    }
+                }
+
+                if (!$tareas) {
+                    return [false, 'No hay palabras clave válidas para generar contenido.', []];
+                }
+
+                // ✅ cortar por remaining final (dominio + global)
+                $tareas = array_slice($tareas, 0, $remaining);
+
+                // =========================================================
+                // 5) crear registros + lista jobs
+                // =========================================================
+                $jobs = [];
+                foreach ($tareas as $t) {
+                    $jobUuid = (string) Str::uuid();
+
+                    $detalle = Dominios_Contenido_DetallesModel::create([
+                        'job_uuid'             => $jobUuid,
+                        'id_dominio_contenido' => (int) $t['id_dominio_contenido'],
+                        'id_dominio'           => (int) $IdDominio,
+                        'tipo'                 => (string) $t['tipo'],
+                        'keyword'              => (string) $t['keyword'],
+                        'estatus'              => 'encolado',
+                        'modelo'               => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+                    ]);
+
+                    $jobs[] = [
+                        'idDominio' => (int)$IdDominio,
+                        'idDominioContenido' => (int)$t['id_dominio_contenido'],
+                        'tipo' => (string)$t['tipo'],
+                        'keyword' => (string)$t['keyword'],
+                        'detalleId' => (int)$detalle->id_dominio_contenido_detalle,
+                        'jobUuid' => (string)$jobUuid,
                     ];
                 }
+
+                $enviadas = count($jobs);
+
+                $ocupadosDespuesDominio = $ocupadosDominio + $enviadas;
+                $ocupadosDespuesGlobal  = $ocupadosGlobal + $enviadas;
+
+                $quedanDominio = max(0, $maxContent - $ocupadosDespuesDominio);
+                $quedanGlobal  = max(0, $maxGlobal - $ocupadosDespuesGlobal);
+
+                $msg = "Generación iniciada. Se enviaron $enviadas tareas. "
+                    . "Dominio: $ocupadosDespuesDominio/$maxContent (quedan $quedanDominio). "
+                    . "Global: $ocupadosDespuesGlobal/$maxGlobal (= $maxActiveDomains dominios x $maxContent) (quedan $quedanGlobal). "
+                    . "Desde 20/01/2026 (plan $plan).";
+
+                return [true, $msg, $jobs];
+            });
+
+            // ✅ DISPATCH fuera de transacción
+            foreach ($jobsToDispatch as $j) {
+                try {
+                    GenerarContenidoKeywordJob::dispatch(
+                        $j['idDominio'],
+                        $j['idDominioContenido'],
+                        $j['tipo'],
+                        $j['keyword'],
+                        $j['detalleId'],
+                        $j['jobUuid'],
+                    )->onConnection('database')->onQueue('default');
+                } catch (\Throwable $e) {
+                    Dominios_Contenido_DetallesModel::where('id_dominio_contenido_detalle', (int)$j['detalleId'])
+                        ->update([
+                            'estatus' => 'error_final',
+                            'error' => 'Dispatch falló: '.$e->getMessage(),
+                        ]);
+                }
             }
 
-            if (!$tareas) {
-                return [false, 'No hay palabras clave válidas para generar contenido.', []];
-            }
+            return $ok ? back()->withSuccess($msg) : back()->withError($msg);
 
-            $tareas = array_slice($tareas, 0, $remaining);
-
-            $jobs = [];
-            foreach ($tareas as $t) {
-                $jobUuid = (string) Str::uuid();
-
-                $detalle = Dominios_Contenido_DetallesModel::create([
-                    'job_uuid'             => $jobUuid,
-                    'id_dominio_contenido' => (int) $t['id_dominio_contenido'],
-                    'id_dominio'           => (int) $IdDominio,
-                    'tipo'                 => (string) $t['tipo'],
-                    'keyword'              => (string) $t['keyword'],
-                    'estatus'              => 'encolado',
-                    'modelo'               => env('DEEPSEEK_MODEL', 'deepseek-chat'),
-                ]);
-
-                $jobs[] = [
-                    'idDominio' => (int)$IdDominio,
-                    'idDominioContenido' => (int)$t['id_dominio_contenido'],
-                    'tipo' => (string)$t['tipo'],
-                    'keyword' => (string)$t['keyword'],
-                    'detalleId' => (int)$detalle->id_dominio_contenido_detalle,
-                    'jobUuid' => (string)$jobUuid,
-                ];
-            }
-
-            $enviadas = count($jobs);
-            $ocupadosDespues = $ocupados + $enviadas;
-            $quedan = max(0, $maxContent - $ocupadosDespues);
-
-            $msg = "Generación iniciada. Se enviaron $enviadas tareas. Llevas $ocupadosDespues / $maxContent desde 20/01/2026 (plan $plan). Te quedan $quedan.";
-
-            return [true, $msg, $jobs];
-        });
-
-        foreach ($jobsToDispatch as $j) {
-            try {
-                GenerarContenidoKeywordJob::dispatch(
-                    $j['idDominio'],
-                    $j['idDominioContenido'],
-                    $j['tipo'],
-                    $j['keyword'],
-                    $j['detalleId'],
-                    $j['jobUuid'],
-                )->onConnection('database')->onQueue('default');
-            } catch (\Throwable $e) {
-                // si falla el dispatch por algo real, no dejes huérfano
-                Dominios_Contenido_DetallesModel::where('id_dominio_contenido_detalle', (int)$j['detalleId'])
-                    ->update([
-                        'estatus' => 'error_final',
-                        'error' => 'Dispatch falló: '.$e->getMessage(),
-                    ]);
-            }
+        } catch (\Throwable $e) {
+            return back()->withError('Error al iniciar generación: '.$e->getMessage());
         }
-
-        return $ok ? back()->withSuccess($msg) : back()->withError($msg);
-
-    } catch (\Throwable $e) {
-        return back()->withError('Error al iniciar generación: '.$e->getMessage());
     }
-}
 
 
 private function promptHtml(string $tipo, string $keyword): string
