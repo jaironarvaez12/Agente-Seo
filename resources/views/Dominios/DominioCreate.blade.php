@@ -29,7 +29,14 @@
                 <div class="col-xxl-6 col-xl-8 col-lg-10">
                     <div class="card border">
                         <div class="card-body">
-
+                            @if(isset($max))
+                            <div class="alert alert-info mb-20">
+                                <b>Plan:</b> {{ $plan }} |
+                                <b>Dominios activados:</b> {{ $used }} / {{ $max }} |
+                                <b>Disponibles:</b> {{ $remaining }}
+                            </div>
+                            @endif
+                            @php $bloqueado = isset($remaining) && $remaining <= 0; @endphp
                            <form method="POST" action="{{ route('dominios.store') }}">
                                 @csrf
 
@@ -71,10 +78,17 @@
                                         Cancelar
                                     </button>
 
-                                    <button type="submit"
-                                            class="btn btn-primary border border-primary-600 text-md px-56 py-12 radius-8">
-                                        Guardar
+                                   <button type="submit"
+                                            class="btn btn-primary border border-primary-600 text-md px-56 py-12 radius-8"
+                                            {{ $bloqueado ? 'disabled' : '' }}>
+                                    Guardar
                                     </button>
+
+                                    @if($bloqueado)
+                                    <div class="text-danger mt-2">
+                                        Ya alcanzaste el límite de tu plan. Desactiva un dominio o mejora tu plan.
+                                    </div>
+                                    @endif
                                 </div>
                             </form>
 

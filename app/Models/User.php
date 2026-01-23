@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Spatie\Permission\Traits\HasRoles;
-
+use Illuminate\Support\Facades\Crypt;
 class User extends Authenticatable
 {
     /** @use HasFactory<\Database\Factories\UserFactory> */
@@ -19,9 +19,11 @@ class User extends Authenticatable
      * @var list<string>
      */
     protected $fillable = [
-        'name',
-        'email',
-        'password',
+       'name',
+  'email',
+  'password',
+  'license_key',
+  'license_email',
     ];
 
     /**
@@ -46,4 +48,15 @@ class User extends Authenticatable
             'password' => 'hashed',
         ];
     }
+
+    public function setLicenseKeyPlain(string $key): void
+{
+    $this->license_key = Crypt::encryptString(trim($key));
+}
+
+public function getLicenseKeyPlain(): ?string
+{
+    if (!$this->license_key) return null;
+    return Crypt::decryptString($this->license_key);
+}
 }

@@ -16,67 +16,149 @@ use Barryvdh\DomPDF\Facade\Pdf;
 use App\Services\ChartImageService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
+use App\Services\LicenseService;
+use Illuminate\Support\Facades\DB;
 use Throwable;
 use Illuminate\Http\Request; 
+// fakes
+use App\Jobs\FakeFetchMozSectionJob;
+use App\Jobs\FakeFetchMozKeywordMetricsJob;
+use App\Jobs\FakeFetchPageSpeedSectionJob;
 class SeoReportController extends Controller
 {
-     public function generar(int $id,Request $request)
+
+    private function hostFromUrl(string $url): string
     {
-        $dominio = DominiosModel::findOrFail($id);
+        $url = trim($url);
+        if (!preg_match('#^https?://#i', $url)) {
+            $url = 'https://' . $url;
+        }
 
-        $preset = $request->input('preset', 'last_30');
+        $host = parse_url($url, PHP_URL_HOST);
 
-        [$start, $end] = match ($preset) {
-            'prev_month' => [
-                now()->subMonthNoOverflow()->startOfMonth()->toDateString(),
-                now()->subMonthNoOverflow()->endOfMonth()->toDateString(),
-            ],
-            'last_3m' => [now()->subMonths(3)->toDateString(), now()->toDateString()],
-            'last_6m' => [now()->subMonths(6)->toDateString(), now()->toDateString()],
-            'custom' => [
-                $request->input('period_start')
-                    ? Carbon::parse($request->input('period_start'))->toDateString()
-                    : now()->subDays(30)->toDateString(),
-                $request->input('period_end')
-                    ? Carbon::parse($request->input('period_end'))->toDateString()
-                    : now()->toDateString(),
-            ],
-            default => [now()->subDays(30)->toDateString(), now()->toDateString()],
-        };
-
-        $report = SeoReport::create([
-            'id_dominio'   => $dominio->id_dominio,
-            'period_start' => $start,
-            'period_end'   => $end,
-            'status'       => 'generando',
-        ]);
-
-        // ✅ Cadena principal
-        Bus::chain([
-            (new FetchMozSectionJob($report->id))->onQueue('reports'),
-            (new RunTechAuditSectionJob($report->id, 200))->onQueue('reports'),
-            (new FinalizeSeoReportJob($report->id))->onQueue('reports'),
-        ])->catch(function (\Throwable $e) use ($report) {
-            FinalizeSeoReportJob::dispatch($report->id)->onQueue('reports');
-        })->dispatch();
-
-        // ✅ PageSpeed fuera
-        FetchPageSpeedSectionJob::dispatch($report->id)
-            ->onQueue('pagespeed')
-            ->delay(now()->addSeconds(20));
-
-        // ✅ Keywords fuera (usa tus keywords)
-        $keywords = $this->keywordsFromDomain($dominio->id_dominio);
-
-        FetchMozKeywordMetricsJob::dispatch($report->id, $keywords, 'desktop', 'google')
-            ->onQueue('reports')
-            ->delay(now()->addSeconds(5));
-
-        return redirect()
-            ->route('dominios.reporte_seo.ver', $dominio->id_dominio)
-            ->with('success', "Reporte SEO en generación. Periodo: {$start} a {$end}.");
+        // fallback
+        return $host ?: rtrim(preg_replace('#^https?://#i', '', $url), '/');
     }
+    public function generar(int $id, Request $request, LicenseService $licenses)
+    {
+        $user = auth()->user();
+        if (!$user) return back()->withError('Debes iniciar sesión.');
 
+        $licensePlain = $user->getLicenseKeyPlain();
+        if (!$licensePlain) return back()->withError('No tienes licencia registrada.');
+
+        try {
+            [$ok, $msg, $redirectUrl] = DB::transaction(function () use ($id, $request, $licenses, $user, $licensePlain) {
+
+                // ✅ lock dominio para evitar doble click simultáneo
+                $dominio = DominiosModel::where('id_dominio', (int)$id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$dominio) {
+                    return [false, 'Dominio no encontrado.', null];
+                }
+
+                $host = $this->hostFromUrl($dominio->url);
+
+                // ✅ límites API (fresh)
+                $planResp = $licenses->getPlanLimitsCached($licensePlain, $host, $user->email, true);
+                $plan   = (string) ($planResp['plan'] ?? 'free');
+                $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
+
+                $maxReports = (int) ($limits['max_report'] ?? ($limits['max_reports'] ?? 0));
+
+                if ($maxReports <= 0) {
+                    return [false, "Tu plan ($plan) no permite generar reportes SEO o el dominio no está activado.", null];
+                }
+
+                // ✅ ventana (igual a tu generador)
+                $desde = Carbon::create(2026, 1, 20, 0, 0, 0);
+
+                // ✅ ocupados = los que están “en cola / generando”
+                // Si tu tabla solo usa 'generando', deja solo ese.
+                $ocupados = (int) SeoReport::where('id_dominio', (int)$dominio->id_dominio)
+                    ->where('created_at', '>=', $desde)
+                    ->whereIn('status', ['generando', 'en_proceso'])
+                    ->count();
+
+                $remaining = $maxReports - $ocupados;
+
+                if ($remaining <= 0) {
+                    return [false, "Límite de reportes alcanzado: $ocupados / $maxReports desde 20/01/2026 (plan $plan).", null];
+                }
+
+                // ====== rango del reporte ======
+                $preset = $request->input('preset', 'last_30');
+
+                [$start, $end] = match ($preset) {
+                    'prev_month' => [
+                        now()->subMonthNoOverflow()->startOfMonth()->toDateString(),
+                        now()->subMonthNoOverflow()->endOfMonth()->toDateString(),
+                    ],
+                    'last_3m' => [now()->subMonths(3)->toDateString(), now()->toDateString()],
+                    'last_6m' => [now()->subMonths(6)->toDateString(), now()->toDateString()],
+                    'custom' => [
+                        $request->input('period_start')
+                            ? Carbon::parse($request->input('period_start'))->toDateString()
+                            : now()->subDays(30)->toDateString(),
+                        $request->input('period_end')
+                            ? Carbon::parse($request->input('period_end'))->toDateString()
+                            : now()->toDateString(),
+                    ],
+                    default => [now()->subDays(30)->toDateString(), now()->toDateString()],
+                };
+
+                if (Carbon::parse($end)->lt(Carbon::parse($start))) {
+                    return [false, 'El rango de fechas es inválido (fin < inicio).', null];
+                }
+
+                // ✅ crear reporte (1 por click)
+                $report = SeoReport::create([
+                    'id_dominio'   => $dominio->id_dominio,
+                    'period_start' => $start,
+                    'period_end'   => $end,
+                    'status'       => 'generando',
+                ]);
+
+                // ✅ Cadena principal (REAL)
+                Bus::chain([
+                    (new FetchMozSectionJob($report->id))->onQueue('reports'),
+                    (new RunTechAuditSectionJob($report->id, 200))->onQueue('reports'),
+                    (new FinalizeSeoReportJob($report->id))->onQueue('reports'),
+                ])->catch(function (\Throwable $e) use ($report) {
+                    FinalizeSeoReportJob::dispatch($report->id)->onQueue('reports');
+                })->dispatch();
+
+                // ✅ PageSpeed fuera (REAL)
+                FetchPageSpeedSectionJob::dispatch($report->id)
+                    ->onQueue('pagespeed')
+                    ->delay(now()->addSeconds(20));
+
+                // ✅ Keywords fuera (REAL)
+                $keywords = $this->keywordsFromDomain($dominio->id_dominio);
+
+                FetchMozKeywordMetricsJob::dispatch($report->id, $keywords, 'desktop', 'google')
+                    ->onQueue('reports')
+                    ->delay(now()->addSeconds(5));
+
+                $ocupadosDespues = $ocupados + 1;
+                $quedan = max(0, $maxReports - $ocupadosDespues);
+
+                $msg = "Reporte SEO en generación. Periodo: {$start} a {$end}. "
+                    . "Llevas {$ocupadosDespues}/{$maxReports} desde 20/01/2026 (plan {$plan}). Te quedan {$quedan}.";
+
+                return [true, $msg, route('dominios.reporte_seo.ver', $dominio->id_dominio)];
+            });
+
+            if (!$ok) return back()->withError($msg);
+
+            return redirect($redirectUrl)->with('success', $msg);
+
+        } catch (\Throwable $e) {
+            return back()->withError('Error al generar reporte: ' . $e->getMessage());
+        }
+    }
     public function ver($id_dominio)
     {
         $dominio = DominiosModel::findOrFail($id_dominio);

@@ -57,4 +57,8 @@ return [
 'quickchart' => [
     'base' => env('QUICKCHART_BASE', 'https://quickchart.io'),
 ],
+'license' => [
+  'base_url' => env('LICENSE_API_BASE_URL'),
+  'timeout'  => env('LICENSE_API_TIMEOUT', 10),
+],
 ];

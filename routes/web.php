@@ -2,7 +2,9 @@
 
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Cache;
-
+use App\Services\LicenseService;
+use App\Models\Dominios_UsuariosModel;
+use App\Models\DominiosModel;
 Route::get('/debug/wp-cache', function () {
     $siteKey = request('site_key', '');
     if ($siteKey === '') return response()->json(['error'=>'missing site_key'], 400);
@@ -91,7 +93,130 @@ Route::post('dominios/{dominio}/contenido/{detalle}/publicar', [App\Http\Control
     Route::get('dominiosidentidad', [App\Http\Controllers\DominiosController::class, 'IdentidadDominios'])->name('dominiosidentidad');
     Route::post('dominiosactualizaridentidad', [App\Http\Controllers\DominiosController::class, 'ActulizarIdentidadDominios'])->name('dominiosactualizaridentidad');
     
+
+    Route::get('/licencia/resumen', function (LicenseService $licenses) {
+    $user = auth()->user();
+    abort_unless($user, 401);
+
+    $key = $user->getLicenseKeyPlain();
+    abort_unless($key, 403, 'No tienes licencia guardada.');
+
+    // Para obtener plan, valida sobre un dominio activo si existe,
+    // si no existe, asumimos pro por ahora o lo guardas en users.
+    $plan = 'pro';
+
+    $max = (int) config("licenses.max_by_plan.$plan", 0);
+
+    $activos = App\Models\LicenciaDominiosActivacionModel::where('user_id', $user->id)
+        ->where('license_key', sha1($key))
+        ->where('estatus', 'activo')
+        ->pluck('dominio')
+        ->toArray();
+
+    $used = count($activos);
+    $remaining = max(0, $max - $used);
+
+    return response()->json([
+        'plan' => $plan,
+        'max' => $max,
+        'usados' => $used,
+        'restantes' => $remaining,
+        'dominios_activos' => $activos,
+    ]);
+})->middleware('auth');
+    
+
+
+
+
+Route::get('/debug/desactivar-todo-bd', function (LicenseService $licenses) {
+    $u = auth()->user();
+    abort_unless($u, 401);
+
+    $key = $u->getLicenseKeyPlain();
+    abort_unless($key, 403);
+
+    $hash = sha1($key);
+
+    $activos = App\Models\LicenciaDominiosActivacionModel::where('user_id', $u->id)
+        ->where('license_key', $hash)
+        ->where('estatus', 'activo')
+        ->pluck('dominio')
+        ->toArray();
+
+    $out = [];
+    foreach ($activos as $dom) {
+        $host = trim(preg_replace('#^https?://#i', '', rtrim($dom, '/')));
+
+        $resp = $licenses->deactivate($key, $host);
+        $out[] = ['domain' => $host, 'response' => $resp];
+
+        // marcar localmente como inactivo
+        App\Models\LicenciaDominiosActivacionModel::where('user_id', $u->id)
+            ->where('license_key', $hash)
+            ->where('dominio', $host)
+            ->update([
+                'estatus' => 'inactivo',
+                'desactivado_at' => now(),
+            ]);
+    }
+
+    return response()->json([
+        'count' => count($activos),
+        'results' => $out,
+        'note' => 'Desactiva los dominios activos según tu registro local.',
+    ]);
+})->middleware('auth');
+
+
+Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
+    $u = auth()->user();
+    abort_unless($u, 401);
+
+    $key = $u->getLicenseKeyPlain();
+    abort_unless($key, 403);
+
+    $domains = request()->query('d', []);
+    if (!is_array($domains) || count($domains) === 0) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Usa: /debug/desactivar-lista?d[]=dom1.com&d[]=dom2.com'
+        ], 422);
+    }
+
+    $out = [];
+    foreach ($domains as $d) {
+        $host = trim(preg_replace('#^https?://#i', '', rtrim($d, '/')));
+
+        try {
+            $resp = $licenses->deactivate($key, $host);
+            $out[] = ['domain' => $host, 'response' => $resp];
+        } catch (\Throwable $e) {
+            $out[] = ['domain' => $host, 'error' => $e->getMessage()];
+        }
+    }
+
+    return response()->json([
+        'count' => count($domains),
+        'results' => $out,
+        'note' => 'Desactiva exactamente los dominios que le pases.',
+    ]);
+})->middleware('auth');
+
+    Route::middleware(['auth'])->group(function () {
+        Route::post('/dominios/{id}/licencia/activar', [App\Http\Controllers\DominiosController::class, 'activarLicencia'])
+            ->name('dominios.licencia.activar');
+
+        Route::post('/dominios/{id}/licencia/desactivar', [App\Http\Controllers\DominiosController::class, 'desactivarLicencia'])
+            ->name('dominios.licencia.desactivar');
     });
+
+    });
+
+
+
+
+
 
 
     Route::view('/politica-de-privacidad', 'legal.politica-privacidad')->name('politica.privacidad');

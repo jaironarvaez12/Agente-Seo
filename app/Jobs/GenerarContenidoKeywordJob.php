@@ -9,6 +9,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Support\Str;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 
 use App\Models\DominiosModel;
 use App\Models\Dominios_Contenido_DetallesModel;
@@ -21,178 +22,219 @@ class GenerarContenidoKeywordJob implements ShouldQueue
     public $tries   = 5;
     public $backoff = [60, 120, 300, 600, 900];
 
-    public string $jobUuid;
     public ?int $registroId = null;
 
     public function __construct(
-        public string $idDominio,
-        public string $idDominioContenido,
+        public int $idDominio,
+        public int $idDominioContenido,
         public string $tipo,
-        public string $keyword
+        public string $keyword,
+        public int $detalleId,
+        public string $jobUuid
     ) {
-        // ✅ UUID real por ejecución (nuevo job = nuevo registro)
-        $this->jobUuid = (string) Str::uuid();
+        $this->tipo = strtolower(trim($this->tipo));
+        $this->keyword = trim($this->keyword);
+        $this->jobUuid = trim($this->jobUuid);
     }
 
-    public function handle(): void
-    {
-        $registro = null;
 
-        try {
-            // 1) Registro por job_uuid (retries del MISMO job)
-            $registro = $this->getOrCreateRegistro();
-            $this->registroId = (int) $registro->id_dominio_contenido_detalle;
+    
 
-            if ($registro->estatus === 'generado' && !empty($registro->contenido_html)) {
+   public function handle(): void
+{
+    $registro = null;
+
+    try {
+        // ✅ 1) El registro DEBE existir (fue reservado antes de encolar)
+        $registro = Dominios_Contenido_DetallesModel::where(
+            'id_dominio_contenido_detalle',
+            (int) $this->detalleId
+        )->first();
+
+        if (!$registro) {
+            throw new \RuntimeException(
+                "NO_RETRY: No existe el detalle reservado (detalleId={$this->detalleId})."
+            );
+        }
+
+        $this->registroId = (int) $registro->id_dominio_contenido_detalle;
+
+        // ✅ 2) Blindaje: el registro reservado debe corresponder a ESTE job_uuid
+        // Si no coincide, este job NO debe tocar ese registro.
+        $regUuid = trim((string) ($registro->job_uuid ?? ''));
+        $jobUuid = trim((string) ($this->jobUuid ?? ''));
+
+        if ($regUuid === '' || $jobUuid === '') {
+            throw new \RuntimeException("NO_RETRY: job_uuid vacío (registro={$regUuid} job={$jobUuid}).");
+        }
+
+        if ($regUuid !== $jobUuid) {
+            throw new \RuntimeException(
+                "NO_RETRY: job_uuid no coincide. esperado={$regUuid} recibido={$jobUuid}."
+            );
+        }
+
+        // ✅ 3) Si ya terminó, no hacer nada
+        if ($registro->estatus === 'generado' && !empty($registro->contenido_html)) {
+            return;
+        }
+
+        // ✅ 4) Marcar en_proceso
+        $registro->update([
+            'estatus' => 'en_proceso',
+            'modelo'  => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+            'error'   => null,
+        ]);
+
+        // ✅ 5) Config IA
+        $apiKey = (string) env('DEEPSEEK_API_KEY', '');
+        $model  = (string) env('DEEPSEEK_MODEL', 'deepseek-chat');
+
+        if ($apiKey === '') {
+            throw new \RuntimeException('NO_RETRY: DEEPSEEK_API_KEY no configurado');
+        }
+
+        // ✅ 6) Plantilla
+        [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int) $this->idDominio);
+
+        // ✅ 7) Tokens meta
+        $tokensMeta = $this->collectTokensMeta($tpl);
+        if (empty($tokensMeta)) {
+            throw new \RuntimeException("NO_RETRY: La plantilla no contiene tokens {{TOKEN}}. Template: {$tplPath}");
+        }
+
+        // ✅ 8) Historial anti-repetición (excluye este mismo registro)
+        $prev = Dominios_Contenido_DetallesModel::where('id_dominio_contenido', (int) $this->idDominioContenido)
+            ->where('id_dominio_contenido_detalle', '!=', (int) $this->registroId)
+            ->whereNotNull('draft_html')
+            ->orderByDesc('id_dominio_contenido_detalle')
+            ->limit(10)
+            ->get(['title', 'draft_html']);
+
+        $usedTitles = [];
+        $usedCorpus = [];
+
+        foreach ($prev as $row) {
+            if (!empty($row->title)) $usedTitles[] = (string) $row->title;
+            $usedCorpus[] = $this->copyTextFromDraftJson((string) $row->draft_html);
+        }
+
+        $noRepetirTitles = implode(' | ', array_slice(array_filter($usedTitles), 0, 20));
+        $noRepetirCorpus = $this->compactHistory($usedCorpus, 3000);
+        $lastCorpus = trim((string) ($usedCorpus[0] ?? ''));
+
+        // ✅ 9) Generación (2 ciclos si se parece demasiado)
+        $finalValues = null;
+
+        for ($cycle = 1; $cycle <= 2; $cycle++) {
+            $brief = $this->creativeBrief();
+
+            // seed estable (depende del jobUuid + registroId)
+            $seed = $this->stableSeedInt((string) $this->jobUuid . '|' . (int) $this->registroId . "|cycle={$cycle}");
+
+            $themePlan = $this->buildThemePlan($seed, 40, 26);
+
+            $values = $this->generateValuesForTemplateTokensBatched(
+                apiKey: $apiKey,
+                model: $model,
+                tokensMeta: $tokensMeta,
+                brief: $brief,
+                seed: $seed,
+                themePlan: $themePlan,
+                noRepetirTitles: $noRepetirTitles,
+                noRepetirCorpus: $noRepetirCorpus
+            );
+
+            $values = $this->stringifyValues($values);
+            $values = $this->fixJoinedWordsInValues($values, $tokensMeta);
+
+            $values = $this->ensureCriticalTokensNotGeneric(
+                apiKey: $apiKey,
+                model: $model,
+                tokensMeta: $tokensMeta,
+                values: $values,
+                brief: $brief,
+                seed: $seed,
+                themePlan: $themePlan,
+                usedTitles: $usedTitles,
+                noRepetirTitles: $noRepetirTitles,
+                noRepetirCorpus: $noRepetirCorpus
+            );
+
+            $values = $this->ensureUniqueTitles(
+                apiKey: $apiKey,
+                model: $model,
+                tokensMeta: $tokensMeta,
+                values: $values,
+                usedTitles: $usedTitles,
+                brief: $brief,
+                seed: $seed,
+                themePlan: $themePlan,
+                noRepetirTitles: $noRepetirTitles,
+                noRepetirCorpus: $noRepetirCorpus
+            );
+
+            $currentText = $this->valuesToPlainText($values);
+            $sim = ($lastCorpus !== '') ? $this->jaccardBigrams($currentText, $lastCorpus) : 0.0;
+
+            $finalValues = $values;
+
+            if ($sim < 0.45) break;
+        }
+
+        if (!is_array($finalValues)) {
+            throw new \RuntimeException('No se pudo generar valores finales');
+        }
+
+        // ✅ 10) Reemplazar tokens
+        [$filled, $replacedCount, $remainingTokens] = $this->fillTemplateTokensWithStats($tpl, $finalValues);
+
+        if ($replacedCount < 1) {
+            throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Template: {$tplPath}");
+        }
+
+        if (!empty($remainingTokens)) {
+            throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remainingTokens, 0, 120)));
+        }
+
+        // ✅ 11) Title + slug
+        $title = trim(strip_tags($this->toStr($finalValues['SEO_TITLE'] ?? $finalValues['HERO_H1'] ?? $this->keyword)));
+        if ($title === '') $title = (string) $this->keyword;
+
+        $slugBase = Str::slug($title ?: $this->keyword);
+        $slug = $slugBase . '-' . (int) $registro->id_dominio_contenido_detalle;
+
+        // ✅ 12) Guardar resultado final
+        $registro->update([
+            'title'          => $title,
+            'slug'           => $slug,
+            'draft_html'     => json_encode($finalValues, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'contenido_html' => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'estatus'        => 'generado',
+            'error'          => null,
+        ]);
+
+    } catch (\Throwable $e) {
+        if ($registro) {
+            $isLast  = ($this->attempts() >= (int) $this->tries);
+            $noRetry = str_contains($e->getMessage(), 'NO_RETRY:');
+
+            $registro->update([
+                'estatus' => ($noRetry || $isLast) ? 'error_final' : 'error',
+                'error'   => $e->getMessage() . ' | attempts=' . $this->attempts(),
+            ]);
+
+            if ($noRetry) {
+                $this->fail($e);
                 return;
             }
-
-            $registro->update([
-                'estatus' => 'en_proceso',
-                'modelo'  => env('DEEPSEEK_MODEL', 'deepseek-chat'),
-                'error'   => null,
-            ]);
-
-            // 2) Config IA
-            $apiKey = (string) env('DEEPSEEK_API_KEY', '');
-            $model  = (string) env('DEEPSEEK_MODEL', 'deepseek-chat');
-            if ($apiKey === '') throw new \RuntimeException('NO_RETRY: DEEPSEEK_API_KEY no configurado');
-
-            // 3) Plantilla
-            [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int)$this->idDominio);
-
-            // 4) Tokens meta
-            $tokensMeta = $this->collectTokensMeta($tpl);
-            if (empty($tokensMeta)) {
-                throw new \RuntimeException("NO_RETRY: La plantilla no contiene tokens {{TOKEN}}. Template: {$tplPath}");
-            }
-
-            // 5) Historial anti-repetición
-            $prev = Dominios_Contenido_DetallesModel::where('id_dominio_contenido', (int)$this->idDominioContenido)
-                ->whereNotNull('draft_html')
-                ->orderByDesc('id_dominio_contenido_detalle')
-                ->limit(10)
-                ->get(['title', 'draft_html']);
-
-            $usedTitles = [];
-            $usedCorpus = [];
-            foreach ($prev as $row) {
-                if (!empty($row->title)) $usedTitles[] = (string)$row->title;
-                $usedCorpus[] = $this->copyTextFromDraftJson((string)$row->draft_html);
-            }
-            $noRepetirTitles = implode(' | ', array_slice(array_filter($usedTitles), 0, 20));
-            $noRepetirCorpus = $this->compactHistory($usedCorpus, 3000);
-            $lastCorpus = trim((string)($usedCorpus[0] ?? ''));
-
-            // 6) Generación (2 ciclos si se parece demasiado)
-            $finalValues = null;
-
-            for ($cycle = 1; $cycle <= 2; $cycle++) {
-                $brief = $this->creativeBrief();
-                $seed  = $this->stableSeedInt($this->jobUuid . '|' . (int)$this->registroId . "|cycle={$cycle}");
-
-                $themePlan = $this->buildThemePlan($seed, 40, 26);
-
-                $values = $this->generateValuesForTemplateTokensBatched(
-                    apiKey: $apiKey,
-                    model: $model,
-                    tokensMeta: $tokensMeta,
-                    brief: $brief,
-                    seed: $seed,
-                    themePlan: $themePlan,
-                    noRepetirTitles: $noRepetirTitles,
-                    noRepetirCorpus: $noRepetirCorpus
-                );
-
-                // ✅ BLINDAJE: convierte TODO a string
-                $values = $this->stringifyValues($values);
-
-                // ✅ FIX: palabras pegadas tipo "AgenciasAgencias"
-                $values = $this->fixJoinedWordsInValues($values, $tokensMeta);
-
-                // ✅ Asegura tokens críticos con IA (evita "Contenido útil..." / "Bloque preparado..." / repetidos)
-                $values = $this->ensureCriticalTokensNotGeneric(
-                    apiKey: $apiKey,
-                    model: $model,
-                    tokensMeta: $tokensMeta,
-                    values: $values,
-                    brief: $brief,
-                    seed: $seed,
-                    themePlan: $themePlan,
-                    usedTitles: $usedTitles,
-                    noRepetirTitles: $noRepetirTitles,
-                    noRepetirCorpus: $noRepetirCorpus
-                );
-
-                // ✅ Enforce: títulos SIEMPRE distintos (solo para SEO_TITLE/HERO_H1 si existen)
-                $values = $this->ensureUniqueTitles(
-                    apiKey: $apiKey,
-                    model: $model,
-                    tokensMeta: $tokensMeta,
-                    values: $values,
-                    usedTitles: $usedTitles,
-                    brief: $brief,
-                    seed: $seed,
-                    themePlan: $themePlan,
-                    noRepetirTitles: $noRepetirTitles,
-                    noRepetirCorpus: $noRepetirCorpus
-                );
-
-                // similitud vs último
-                $currentText = $this->valuesToPlainText($values);
-                $sim = ($lastCorpus !== '') ? $this->jaccardBigrams($currentText, $lastCorpus) : 0.0;
-
-                $finalValues = $values;
-                if ($sim < 0.45) break;
-            }
-
-            if (!is_array($finalValues)) throw new \RuntimeException('No se pudo generar valores finales');
-
-            // 7) Reemplazar tokens
-            [$filled, $replacedCount, $remainingTokens] = $this->fillTemplateTokensWithStats($tpl, $finalValues);
-
-            if ($replacedCount < 1) {
-                throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Template: {$tplPath}");
-            }
-            if (!empty($remainingTokens)) {
-                throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remainingTokens, 0, 120)));
-            }
-
-            // 8) Title + slug (SEO_TITLE primero)
-            $title = trim(strip_tags($this->toStr($finalValues['SEO_TITLE'] ?? $finalValues['HERO_H1'] ?? $this->keyword)));
-            if ($title === '') $title = $this->keyword;
-
-            $slugBase = Str::slug($title ?: $this->keyword);
-            $slug = $slugBase . '-' . $registro->id_dominio_contenido_detalle;
-
-            // 9) Guardar
-            $registro->update([
-                'title'          => $title,
-                'slug'           => $slug,
-                'draft_html'     => json_encode($finalValues, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'contenido_html' => json_encode($filled, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                'estatus'        => 'generado',
-                'error'          => null,
-            ]);
-
-        } catch (\Throwable $e) {
-            if ($registro) {
-                $isLast  = ($this->attempts() >= (int)$this->tries);
-                $noRetry = str_contains($e->getMessage(), 'NO_RETRY:');
-
-                $registro->update([
-                    'estatus' => ($noRetry || $isLast) ? 'error_final' : 'error',
-                    'error'   => $e->getMessage() . ' | attempts=' . $this->attempts(),
-                ]);
-
-                if ($noRetry) {
-                    $this->fail($e);
-                    return;
-                }
-            }
-            throw $e;
         }
+
+        throw $e;
     }
+}
+
+
 
     private function getOrCreateRegistro(): Dominios_Contenido_DetallesModel
     {
@@ -1409,4 +1451,14 @@ PROMPT;
         if ($kw === '') return 'tu proyecto';
         return mb_substr($kw, 0, 70);
     }
+    public function failed(\Throwable $e): void
+{
+    try {
+        Dominios_Contenido_DetallesModel::where('id_dominio_contenido_detalle', (int)$this->detalleId)
+            ->update([
+                'estatus' => 'error_final',
+                'error'   => $e->getMessage(),
+            ]);
+    } catch (\Throwable $ignore) {}
+}
 }

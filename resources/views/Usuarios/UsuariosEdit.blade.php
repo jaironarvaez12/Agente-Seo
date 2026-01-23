@@ -88,6 +88,29 @@
                                         <input type="text" class="form-control radius-8" id="telefono" name="telefono" placeholder="Ingrese su telefono">
                                         
                                     </div> --}}
+                                    <div class="mb-20">
+                                        <label class="form-label fw-semibold text-primary-light text-sm mb-8">
+                                            Licencia (dejar vacío si no se cambia)
+                                        </label>
+
+                                        <input type="text"
+                                                class="form-control radius-8 @error('license_key') is-invalid @enderror"
+                                                name="license_key"
+                                                value="{{ old('license_key') }}"
+                                                placeholder="Pega aquí la licencia nueva">
+                                        </div>
+
+                                        <div class="mb-20">
+                                        <label class="form-label fw-semibold text-primary-light text-sm mb-8">
+                                            Email de licencia (opcional)
+                                        </label>
+
+                                        <input type="text"
+                                                class="form-control radius-8 @error('license_email') is-invalid @enderror"
+                                                name="license_email"
+                                                value="{{ old('license_email', $usuario->license_email ?? '') }}"
+                                                placeholder="email del cliente (opcional)">
+                                        </div>
                                     
                                     <div class="mb-20">
                                        <label for="depart" class="form-label fw-semibold text-primary-light text-sm mb-8">Rol</label>

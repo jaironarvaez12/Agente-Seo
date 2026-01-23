@@ -26,6 +26,13 @@
 </div>
 
           <div class="card basic-data-table">
+            @if(isset($max))
+                <div class="alert alert-info mb-20">
+                    <b>Plan:</b> {{ $plan }} |
+                    <b>Dominios activados:</b> {{ $used }} / {{ $max }} |
+                    <b>Disponibles:</b> {{ $remaining }}
+                </div>
+            @endif
            <div class="card-header text-end">
                <div class="d-flex justify-content-end">
                     <div style="width: auto;">
@@ -84,6 +91,29 @@
                                                 d-flex justify-content-center align-items-center rounded-circle">
                                             <iconify-icon icon="majesticons:eye-line" class="menu-icon"></iconify-icon>
                                         </a>
+                                        @if($perfil->estatus == 'SI')
+                                            {{-- DESACTIVAR --}}
+                                            <form action="{{ route('dominios.licencia.desactivar', $perfil->id_dominio) }}" method="POST" style="display:inline;">
+                                                @csrf
+                                                <button type="submit"
+                                                    title="Desactivar"
+                                                    class="bg-danger-focus text-danger-600 bg-hover-danger-200 fw-medium w-40-px h-40-px 
+                                                        d-flex justify-content-center align-items-center rounded-circle border-0">
+                                                    <iconify-icon icon="material-symbols:pause-circle-outline" class="menu-icon"></iconify-icon>
+                                                </button>
+                                            </form>
+                                        @else
+                                            {{-- ACTIVAR --}}
+                                            <form action="{{ route('dominios.licencia.activar', $perfil->id_dominio) }}" method="POST" style="display:inline;">
+                                                @csrf
+                                                <button type="submit"
+                                                    title="Activar"
+                                                    class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px 
+                                                        d-flex justify-content-center align-items-center rounded-circle border-0">
+                                                    <iconify-icon icon="material-symbols:play-circle-outline" class="menu-icon"></iconify-icon>
+                                                </button>
+                                            </form>
+                                        @endif      
                                         {{-- <a href="{{ route('dominioscrearcontenido', $perfil->id_dominio) }}" 
                                             title="Crear"
                                             class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px 

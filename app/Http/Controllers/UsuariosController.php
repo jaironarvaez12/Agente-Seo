@@ -139,7 +139,13 @@ class UsuariosController extends Controller
             
               
              ]);
-            
+            // Guardar license_email (si viene)
+            $usuario->license_email = $request->input('license_email');
+
+            // Guardar license_key SOLO si el usuario pegó una nueva
+            if ($request->filled('license_key')) {
+                $usuario->setLicenseKeyPlain($request->input('license_key'));
+            }
             $usuario->syncRoles($request->input('roles'));  //Sinronizacion de rol
             //  $usuario->syncPermissions($request->input('permisos', [])); // agregar los permisos 
 

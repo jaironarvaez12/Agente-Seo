@@ -6,6 +6,7 @@ use App\Models\Dominios_ContenidoModel;
 use App\Models\Dominios_Contenido_DetallesModel;
 use App\Models\DominiosModel;
 use App\Models\Dominios_UsuariosModel;
+use App\Models\LicenciaDominiosActivacionModel;
 use App\Models\SeoReport;
 use Illuminate\Http\Request;
 use Exception;
@@ -23,56 +24,212 @@ use Illuminate\Support\Facades\File;
 use Intervention\Image\Laravel\Facades\Image; 
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
+use App\Services\LicenseService;
 class DominiosController extends Controller
 {
     /**
      * Display a listing of the resource.
      */
+    private function hostFromUrl(string $url): string
+    {
+        $url = trim($url);
+        if (!preg_match('#^https?://#i', $url)) {
+            $url = 'https://' . $url;
+        }
+
+        $host = parse_url($url, PHP_URL_HOST);
+
+        // fallback
+        return $host ?: rtrim(preg_replace('#^https?://#i', '', $url), '/');
+    }
+    private function countQueuedJobsForDomain(int $idDominio, \Carbon\Carbon $desde): int
+    {
+        if (!DB::getSchemaBuilder()->hasTable('jobs')) {
+            return 0;
+        }
+
+        $rows = DB::table('jobs')
+            ->select('payload', 'created_at')
+            ->where('created_at', '>=', $desde->timestamp)
+            // ✅ filtra rápido por nombre del job (esto SÍ está en texto plano)
+            ->where('payload', 'like', '%GenerarContenidoKeywordJob%')
+            ->get();
+
+        $count = 0;
+
+        foreach ($rows as $row) {
+            $payload = json_decode($row->payload, true);
+            if (!is_array($payload)) continue;
+
+            $commandB64 = data_get($payload, 'data.command');
+            if (!is_string($commandB64) || $commandB64 === '') continue;
+
+            try {
+                $serialized = base64_decode($commandB64, true);
+                if ($serialized === false) continue;
+
+                $job = @unserialize($serialized);
+                if (!is_object($job)) continue;
+
+                // ✅ Asegura que sea TU job
+                if (!$job instanceof \App\Jobs\GenerarContenidoKeywordJob) continue;
+
+                // ✅ Ahora sí: leer idDominio real del job
+                $jobDomainId = (int) ($job->idDominio ?? 0);
+
+                if ($jobDomainId === $idDominio) {
+                    $count++;
+                }
+            } catch (\Throwable $e) {
+                // si algún payload está raro, lo ignoramos
+                continue;
+            }
+        }
+
+        return $count;
+    }
     public function index()
     {
         
-  
-        $dominios = DominiosModel::all();
-        return view('Dominios.Dominio',compact('dominios'));
+    $dominios = DominiosModel::all();
+
+    $user = auth()->user();
+
+    $plan = 'pro';
+    $max = (int) config("licenses.max_by_plan.$plan", 0);
+
+    $used = 0;
+    $remaining = 0;
+
+    if ($user && $user->license_key) {
+        $licensePlain = $user->getLicenseKeyPlain();
+
+        $used = (int) LicenciaDominiosActivacionModel::where('user_id', $user->id)
+            ->where('license_key', sha1($licensePlain))
+            ->where('estatus', 'activo')
+            ->count();
+
+        $remaining = max(0, $max - $used);
+    }
+
+    return view('Dominios.Dominio', compact('dominios', 'plan', 'max', 'used', 'remaining'));
     }
 
     /**
      * Show the form for creating a new resource.
      */
-    public function create()
+   public function create()
     {
-          return view('Dominios.DominioCreate');
+        $user = auth()->user();
+
+        $plan = 'pro'; // por ahora fijo. Luego lo guardamos en users (license_plan)
+        $max = (int) config("licenses.max_by_plan.$plan", 0);
+
+        $used = 0;
+        $remaining = 0;
+
+        if ($user && $user->license_key) {
+            $licensePlain = $user->getLicenseKeyPlain();
+
+            $used = (int) LicenciaDominiosActivacionModel::where('user_id', $user->id)
+                ->where('license_key', sha1($licensePlain))
+                ->where('estatus', 'activo')
+                ->count();
+
+            $remaining = max(0, $max - $used);
+        }
+
+        return view('Dominios.DominioCreate', compact('plan', 'max', 'used', 'remaining'));
     }
+
 
     /**
      * Store a newly created resource in storage.
      */
-    public function store(Request $request)
-    {
-        //dd($request);
-         $IdDominio= DominiosModel::max('id_dominio')+1;
-        try 
-         {
-             DB::transaction(function () use ($request, $IdDominio)
-            {
-                  
-                DominiosModel::create([
-                    'id_dominio' =>    $IdDominio,
-                    'url' =>    $request['url'],
-                    'nombre' =>strtoupper($request['nombre']),
-                    'estatus' =>strtoupper('SI'),
-                      'usuario' => $request['usuario'],
-                      'password'=> Crypt::encryptString($request->input('password'))
-                ]);
-            });
- 
-         } 
-         catch (Exception $ex) 
-         {
-             return back()->withError('Ocurrio Un Error al Crear el Dominio ' . $ex->getMessage())->withInput();
-         }
-          return redirect("dominios")->withSuccess('El Dominio Se Ha Creado Exitosamente');
+    public function store(Request $request, LicenseService $licenses)
+{
+    $user = auth()->user();
+    if (!$user) {
+        return back()->withError('Debes iniciar sesión.')->withInput();
     }
+
+    $licensePlain = $user->getLicenseKeyPlain();
+    if (!$licensePlain) {
+        return back()->withError('Tu usuario no tiene licencia registrada.')->withInput();
+    }
+
+    // Plan y máximo (local)
+    $plan = 'pro';
+    $max = (int) config("licenses.max_by_plan.$plan", 0);
+
+    // Conteo local (sirve para UI, pero NO es fuente de verdad)
+    $usedLocal = (int) LicenciaDominiosActivacionModel::where('user_id', $user->id)
+        ->where('license_key', sha1($licensePlain))
+        ->where('estatus', 'activo')
+        ->count();
+
+    $remainingLocal = max(0, $max - $usedLocal);
+
+    if ($max > 0 && $remainingLocal <= 0) {
+        return back()->withError("Ya alcanzaste el límite de tu plan ($plan): máximo $max dominios activos.")->withInput();
+    }
+
+    // Normalizar host del dominio a activar
+    $host = $this->hostFromUrl($request->input('url'));
+
+    // 🔥 PROBE (FUENTE DE VERDAD): verificar cupo real en el servidor
+    // Si esto falla, no creamos el dominio ni tocamos BD.
+    $email = $user->license_email ?? $user->email;
+    $probe = 'probe-' . substr(sha1(uniqid('', true)), 0, 10) . '.ideiweb.com';
+
+    try {
+        $probeResp = $licenses->activate($licensePlain, $probe, $email);
+
+        if (!data_get($probeResp, 'activated')) {
+            $msg = data_get($probeResp, 'message', 'No hay cupo disponible.');
+            return back()->withError("No tienes activaciones disponibles en el servidor de licencias. ($msg)")->withInput();
+        }
+
+        // Limpieza: desactivar probe para no consumir slot
+        $licenses->deactivate($licensePlain, $probe);
+
+    } catch (\Throwable $e) {
+        return back()->withError('No se pudo verificar cupo de activaciones: ' . $e->getMessage())->withInput();
+    }
+
+    // Crear dominio + activar y registrar
+    $IdDominio = (int) DominiosModel::max('id_dominio') + 1;
+
+    try {
+        DB::transaction(function () use ($request, $IdDominio, $licenses, $user, $licensePlain, $host, $email) {
+
+            DominiosModel::create([
+                'id_dominio' => $IdDominio,
+                'url' => $request['url'],
+                'nombre' => strtoupper($request['nombre']),
+                'estatus' => strtoupper('SI'),
+                'usuario' => $request['usuario'],
+                'password' => Crypt::encryptString($request->input('password')),
+            ]);
+
+            $resp = $licenses->activarYRegistrar(
+                $user->id,
+                $licensePlain,
+                $host,
+                $email
+            );
+
+            if (!data_get($resp, 'activated')) {
+                throw new \Exception(data_get($resp, 'message', 'No se pudo activar la licencia para este dominio.'));
+            }
+        });
+
+    } catch (\Throwable $ex) {
+        return back()->withError('Ocurrió un error al crear/activar el dominio: ' . $ex->getMessage())->withInput();
+    }
+
+    return redirect("dominios")->withSuccess('El Dominio se ha creado y activado exitosamente');
+}
 
     /**
      * Display the specified resource.
@@ -442,66 +599,171 @@ public function verWp($id, WordpressService $wp)
 
 
 
-    public function Generador(string $IdDominio)
+
+
+public function Generador(string $IdDominio, LicenseService $licenses)
 {
-    $configs = Dominios_ContenidoModel::select('id_dominio_contenido','tipo','palabras_claves')
-        ->where('id_dominio', $IdDominio)
-        ->orderByDesc('id_dominio_contenido')
-        ->get();
+    $user = auth()->user();
+    if (!$user) return back()->withError('Debes iniciar sesión.');
 
-    if ($configs->isEmpty()) {
-        return back()->withError('No hay configuración para este dominio.');
-    }
+    $licensePlain = $user->getLicenseKeyPlain();
+    if (!$licensePlain) return back()->withError('No tienes licencia registrada.');
 
-    // Normaliza tipo a 'post' o 'page' y deja solo esas configs
-    $configs = $configs->map(function ($c) {
-        $tipoRaw = strtolower(trim((string)$c->tipo));
+    $jobsToDispatch = [];
+    $msg = null;
+    $ok = false;
 
-        $tipo = match ($tipoRaw) {
-            'post', 'posts' => 'post',
-            'page', 'pagina', 'página', 'paginas', 'páginas' => 'page',
-            default => null,
-        };
+    try {
+        [$ok, $msg, $jobsToDispatch] = DB::transaction(function () use ($IdDominio, $licenses, $licensePlain, $user) {
 
-        $c->tipo_normalizado = $tipo;
-        return $c;
-    })->filter(fn($c) => in_array($c->tipo_normalizado, ['post','page'], true));
+            $dominio = DominiosModel::where('id_dominio', (int)$IdDominio)
+                ->lockForUpdate()
+                ->first();
 
-    if ($configs->isEmpty()) {
-        return back()->withError('No hay configuraciones válidas (post/page) para este dominio.');
-    }
+            if (!$dominio) {
+                return [false, 'Dominio no encontrado.', []];
+            }
 
-    foreach ($configs as $config) {
-        $tipo = $config->tipo_normalizado;
+            $host = $this->hostFromUrl($dominio->url);
 
-        $raw = (string)$config->palabras_claves;
-        $palabras = json_decode($raw, true);
+            $planResp = $licenses->getPlanLimitsCached($licensePlain, $host, $user->email, true);
+            $plan   = (string) ($planResp['plan'] ?? 'free');
+            $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
+            $maxContent = (int) ($limits['max_content'] ?? 0);
 
-        if (!is_array($palabras)) {
-            $palabras = array_values(array_filter(array_map('trim', explode(',', $raw))));
+            if ($maxContent <= 0) {
+                return [false, "Tu plan ($plan) no permite generar contenido o el dominio no está activado.", []];
+            }
+
+            $desde = Carbon::create(2026, 1, 20, 0, 0, 0);
+
+            $ocupados = (int) Dominios_Contenido_DetallesModel::where('id_dominio', (int)$IdDominio)
+                ->whereIn('tipo', ['post','page'])
+                ->where('created_at', '>=', $desde)
+                ->whereIn('estatus', ['encolado','en_proceso','generado'])
+                ->count();
+
+            if ($ocupados >= $maxContent) {
+                return [false, "Límite alcanzado: $ocupados / $maxContent desde 20/01/2026 (plan $plan).", []];
+            }
+
+            $remaining = $maxContent - $ocupados;
+
+            $configs = Dominios_ContenidoModel::select('id_dominio_contenido','tipo','palabras_claves')
+                ->where('id_dominio', (int)$IdDominio)
+                ->orderByDesc('id_dominio_contenido')
+                ->get();
+
+            if ($configs->isEmpty()) {
+                return [false, 'No hay configuración para este dominio.', []];
+            }
+
+            $configs = $configs->map(function ($c) {
+                $tipoRaw = strtolower(trim((string)$c->tipo));
+                $tipo = match ($tipoRaw) {
+                    'post', 'posts' => 'post',
+                    'page', 'pagina', 'página', 'paginas', 'páginas' => 'page',
+                    default => null,
+                };
+                $c->tipo_normalizado = $tipo;
+                return $c;
+            })->filter(fn($c) => in_array($c->tipo_normalizado, ['post','page'], true));
+
+            if ($configs->isEmpty()) {
+                return [false, 'No hay configuraciones válidas (post/page) para este dominio.', []];
+            }
+
+            // 3) construir tareas (AQUÍ NO FILTRAMOS keywords, porque SÍ pueden repetirse)
+            $tareas = [];
+            foreach ($configs as $config) {
+                $tipo = $config->tipo_normalizado;
+
+                $raw = (string)$config->palabras_claves;
+                $palabras = json_decode($raw, true);
+                if (!is_array($palabras)) {
+                    $palabras = array_values(array_filter(array_map('trim', explode(',', $raw))));
+                }
+                if (!$palabras) continue;
+
+                $palabras = array_slice($palabras, 0, 5);
+
+                foreach ($palabras as $kw) {
+                    $kw = trim((string)$kw);
+                    if ($kw === '') continue;
+
+                    $tareas[] = [
+                        'id_dominio_contenido' => (int)$config->id_dominio_contenido,
+                        'tipo' => (string)$tipo,
+                        'keyword' => $kw,
+                    ];
+                }
+            }
+
+            if (!$tareas) {
+                return [false, 'No hay palabras clave válidas para generar contenido.', []];
+            }
+
+            $tareas = array_slice($tareas, 0, $remaining);
+
+            $jobs = [];
+            foreach ($tareas as $t) {
+                $jobUuid = (string) Str::uuid();
+
+                $detalle = Dominios_Contenido_DetallesModel::create([
+                    'job_uuid'             => $jobUuid,
+                    'id_dominio_contenido' => (int) $t['id_dominio_contenido'],
+                    'id_dominio'           => (int) $IdDominio,
+                    'tipo'                 => (string) $t['tipo'],
+                    'keyword'              => (string) $t['keyword'],
+                    'estatus'              => 'encolado',
+                    'modelo'               => env('DEEPSEEK_MODEL', 'deepseek-chat'),
+                ]);
+
+                $jobs[] = [
+                    'idDominio' => (int)$IdDominio,
+                    'idDominioContenido' => (int)$t['id_dominio_contenido'],
+                    'tipo' => (string)$t['tipo'],
+                    'keyword' => (string)$t['keyword'],
+                    'detalleId' => (int)$detalle->id_dominio_contenido_detalle,
+                    'jobUuid' => (string)$jobUuid,
+                ];
+            }
+
+            $enviadas = count($jobs);
+            $ocupadosDespues = $ocupados + $enviadas;
+            $quedan = max(0, $maxContent - $ocupadosDespues);
+
+            $msg = "Generación iniciada. Se enviaron $enviadas tareas. Llevas $ocupadosDespues / $maxContent desde 20/01/2026 (plan $plan). Te quedan $quedan.";
+
+            return [true, $msg, $jobs];
+        });
+
+        foreach ($jobsToDispatch as $j) {
+            try {
+                GenerarContenidoKeywordJob::dispatch(
+                    $j['idDominio'],
+                    $j['idDominioContenido'],
+                    $j['tipo'],
+                    $j['keyword'],
+                    $j['detalleId'],
+                    $j['jobUuid'],
+                )->onConnection('database')->onQueue('default');
+            } catch (\Throwable $e) {
+                // si falla el dispatch por algo real, no dejes huérfano
+                Dominios_Contenido_DetallesModel::where('id_dominio_contenido_detalle', (int)$j['detalleId'])
+                    ->update([
+                        'estatus' => 'error_final',
+                        'error' => 'Dispatch falló: '.$e->getMessage(),
+                    ]);
+            }
         }
 
-        if (count($palabras) === 0) {
-            // si quieres que falle si UNA config no tiene palabras, cambia a return back()->withError(...)
-            continue;
-        }
+        return $ok ? back()->withSuccess($msg) : back()->withError($msg);
 
-        // ✅ límite por click
-        $palabras = array_slice($palabras, 0, 5);
-
-        foreach ($palabras as $keyword) {
-            dispatch(new GenerarContenidoKeywordJob(
-                $IdDominio,
-                (string)$config->id_dominio_contenido,
-                $tipo,
-                $keyword
-            ));
-        }
+    } catch (\Throwable $e) {
+        return back()->withError('Error al iniciar generación: '.$e->getMessage());
     }
-
-    return back()->withSuccess('Generación iniciada. Se está procesando en segundo plano.');
 }
-
 
 
 private function promptHtml(string $tipo, string $keyword): string
@@ -1046,7 +1308,101 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     }
 
 
+public function activarLicencia($id, LicenseService $licenses)
+{
+    $user = auth()->user();
+    if (!$user) return back()->withError('Debes iniciar sesión.');
 
+    $licensePlain = $user->getLicenseKeyPlain();
+    if (!$licensePlain) return back()->withError('Tu usuario no tiene licencia registrada.');
+
+    $dominio = DominiosModel::where('id_dominio', $id)->first();
+    if (!$dominio) return back()->withError('Dominio no encontrado.');
+
+    $plan = 'pro';
+    $max = (int) config("licenses.max_by_plan.$plan", 0);
+
+    // Conteo local (para bloquear UI; servidor igual manda el máximo real)
+    $used = (int) LicenciaDominiosActivacionModel::where('user_id', $user->id)
+        ->where('license_key', sha1($licensePlain))
+        ->where('estatus', 'activo')
+        ->count();
+
+    if ($max > 0 && $used >= $max) {
+        return back()->withError("Límite alcanzado: $used / $max dominios activos.");
+    }
+
+    $host = $this->hostFromUrl($dominio->url);
+
+    try {
+        DB::transaction(function () use ($licenses, $user, $licensePlain, $host, $dominio) {
+            $resp = $licenses->activarYRegistrar(
+                $user->id,
+                $licensePlain,
+                $host,
+                $user->license_email ?? $user->email
+            );
+
+            if (!data_get($resp, 'activated')) {
+                throw new \Exception(data_get($resp, 'message', 'No se pudo activar la licencia.'));
+            }
+
+            // Opcional: reflejarlo en tu tabla dominios
+            $dominio->estatus = 'SI';
+            $dominio->save();
+        });
+
+    } catch (\Throwable $e) {
+        return back()->withError('No se pudo activar: ' . $e->getMessage());
+    }
+
+    return back()->withSuccess('Licencia activada para el dominio.');
+}
+
+public function desactivarLicencia($id, LicenseService $licenses)
+{
+    $user = auth()->user();
+    if (!$user) return back()->withError('Debes iniciar sesión.');
+
+    $licensePlain = $user->getLicenseKeyPlain();
+    if (!$licensePlain) return back()->withError('Tu usuario no tiene licencia registrada.');
+
+    $dominio = DominiosModel::where('id_dominio', $id)->first();
+    if (!$dominio) return back()->withError('Dominio no encontrado.');
+
+    $host = $this->hostFromUrl($dominio->url);
+
+    try {
+        DB::transaction(function () use ($licenses, $user, $licensePlain, $host, $dominio) {
+
+            $resp = $licenses->desactivarYRegistrar(
+                $user->id,
+                $licensePlain,
+                $host
+            );
+
+            // Si no estaba activado, la API puede decir "not activated on this domain"
+            // En ese caso igual lo marcamos inactivo localmente.
+            $msg = (string) data_get($resp, 'message', '');
+
+            $ok = (bool) data_get($resp, 'deactivated', false) || (bool) data_get($resp, 'success', false)
+                || str_contains(strtolower($msg), 'not activated');
+
+            if (!$ok) {
+                throw new \Exception($msg ?: 'No se pudo desactivar la licencia.');
+            }
+
+            // Opcional: reflejarlo en tu tabla dominios
+            $dominio->estatus = 'NO';
+            $dominio->save();
+        });
+
+    } catch (\Throwable $e) {
+        return back()->withError('No se pudo desactivar: ' . $e->getMessage());
+    }
+
+    return back()->withSuccess('Licencia desactivada para el dominio.');
+}
 
 
 }
