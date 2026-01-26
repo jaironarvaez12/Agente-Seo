@@ -4,7 +4,12 @@
 
 
 @section('contenido')
-
+<style>
+  .paleta-texto .palette-item.active{
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+  }
+</style>
 @include('mensajes.MsjExitoso')
 @include('mensajes.MsjError')
 <div class="dashboard-main-body">
@@ -31,65 +36,8 @@
       <form method="POST" action="{{ route('dominiosactualizaridentidad') }}" enctype="multipart/form-data">
       @csrf
         <div class="card h-100 p-0 radius-12">
-          <div class="card-body p-24">
-            <div class="mb-24 mt-16">
-                <label for="url" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                  Logo 
-                </label>
-              <div class="avatar-upload position-relative">
-                <div class="avatar-edit position-absolute bottom-0 end-0 me-24 mb-24 z-1 cursor-pointer">
-                  <input type="file" id="imagen" name="imagen" accept=".png, .jpg, .jpeg" hidden>
-
-                  <label for="imagen"
-                    class="w-48-px h-48-px d-flex justify-content-center align-items-center
-                          bg-primary-50 text-primary-600 border border-primary-600
-                          bg-hover-primary-100 text-xl rounded-circle">
-                    <iconify-icon icon="solar:camera-outline" class="icon"></iconify-icon>
-                  </label>
-                </div>
-
-                @php
-                  $imgRel = null;
-                  $baseUrl = ($imgRel && file_exists(public_path($imgRel)))
-                    ? asset($imgRel)
-                    : asset('images/faq-img.png');
-                  $imgUrl = $baseUrl . '?v=' . time();
-                @endphp
-
-                <div class="hover-scale-img border radius-16 overflow-hidden p-8" style="width:320px;">
-                  <a href="{{ $imgUrl }}" class="popup-img w-100 h-100 d-flex radius-12 overflow-hidden">
-                    <img id="avatar-img"
-                        src="{{ $imgUrl }}"
-                        alt="Imagen"
-                        class="hover-scale-img__img w-100 h-100 object-fit-cover radius-12"
-                        style="object-fit: cover; height:320px;">
-                  </a>
-                </div>
-              </div>
-              <br>
-                <div class="mb-20">
-                    <label for="nombre" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                        Datos de ubicacion o Direccion
-                    </label>
-                    <input type="text" class="form-control radius-8" id="nombre" name="nombre" placeholder="Ej: Antigua Casa del Mar, Av. Perfecto Palacio de la Fuente, 1, 03003 Alicante 641051145" >
-                </div>
-
-
-
-                {{-- Color de texto seleccionado --}}
-              <div class="mb-20">
-                  <label class="form-label fw-semibold text-primary-light text-sm mb-8">
-                    Color de texto
-                  </label>
-
-                  {{-- Input donde se guarda el color seleccionado --}}
-                  <input type="text" class="form-control radius-8 mb-12"
-                        id="color_texto_preview" placeholder="Selecciona un color..." readonly>
-
-                  <input type="hidden" id="color_texto" name="color_texto" value="">
-
-                  {{-- Paleta --}}
-                  @php
+         
+           @php
                     $paletaTexto = [
                       ['hex' => '#487FFF', 'class' => 'text-primary-600'],
                       ['hex' => '#22C55E', 'class' => 'text-success-main'],
@@ -99,76 +47,137 @@
                       ['hex' => '#FFFFFF', 'class' => 'text-primary-light'],
                     ];
                   @endphp
+          <div class="card-body">
+              <div class="table-responsive scroll-sm">
+                <table class="table bordered-table mb-0" id="tabla_identidad" data-page-length='10'>
+                  <thead>
+                      <tr>
+                            <th style="display:none;">Id_Dominio</th>
+                            <th scope="col">Nombre Dominio</th>
+                            <th scope="col">Datos de ubicacion o Direccion</th>
+                            <th scope="col">Imagen</th>
+                            <th scope="col">Color</th>
+                      
+                      </tr>
+                  </thead>
+                  <tbody>
+                     @foreach ($dominios as $dom)
+                      <tr>
+                        <td id="id_dominio" style="display:none;">{{ $dom->id_dominio}}</td>
+                        <td id="nombre_dominio">{{ $dom->nombre}}</td>
+                        <td>
+                      
+                          <textarea class="form-control radius-8 direccion"
+                            name="direcciones[{{ $dom->id_dominio }}]"
+                            rows="4">{{ old('direcciones.'.$dom->id_dominio, $dom->direccion ?? '') }}</textarea>
+                        </td>
+                        <td id="imagen">
+                          <div class="mb-24 mt-16">
+                                 
+                                <div class="avatar-upload">
+                                   <div class="avatar-edit position-absolute bottom-0 end-0 me-24 mt-16 z-1 cursor-pointer">
+                                     
+                                        
+                                        <input type="file" id="imagen_{{ $dom->id_dominio }}" name="imagenes[{{ $dom->id_dominio }}]" class="input-imagen" accept=".png, .jpg, .jpeg" hidden>
+                                        
+                                   
+                                        <label for="imagen_{{ $dom->id_dominio }}" class="w-32-px h-32-px d-flex justify-content-center align-items-center bg-primary-50 text-primary-600 border border-primary-600 bg-hover-primary-100 text-lg rounded-circle">
+                                            <iconify-icon icon="solar:camera-outline" class="icon"></iconify-icon>
+                                        </label>
 
-                  <div class="d-flex flex-wrap gap-12" id="paleta-texto">
-                    @foreach($paletaTexto as $c)
-                      <button type="button"
-                              class="btn btn-sm border radius-8 d-flex align-items-center gap-8 palette-item {{ $c['class'] }}"
-                              data-hex="{{ $c['hex'] }}"
-                              data-class="{{ $c['class'] }}"
-                              style="background: transparent;">
-                        <span class="fw-semibold">Aa</span>
-                        <span class="fw-semibold">({{ $c['hex'] }})</span>
-                      </button>
-                    @endforeach
-                  </div>
+                                        
+                                    </div>
+                                    @php
+                                        $imgRel = $dom->imagen ?? null;
+                                        $baseUrl = ($imgRel && file_exists(public_path($imgRel)))
+                                            ? asset($imgRel)
+                                            : asset('images/placeholder.jpg');
 
-                  <small class="text-secondary-light d-block mt-8">
-                    Tip: al seleccionar un color, se guarda en el input oculto <code>color_texto</code>.
-                  </small>
-                </div>
+                                        // ✅ Versión súper simple para evitar caché:
+                                        $imgUrl = $baseUrl . '?v=' . time();
+                                    @endphp
 
-            </div>
-            
+                                    <div class="hover-scale-img border radius-16 overflow-hidden p-8" style="width:160px;">
+                                        <a href="{{ $imgUrl }}" class="popup-img w-100 h-100 d-flex radius-12 overflow-hidden">
+                                            <img class="avatar-img"
+                                                src="{{ $imgUrl }}"
+                                                alt="Imagen"
+                                                class="hover-scale-img__img w-100 h-100 object-fit-cover radius-12"
+                                                style="object-fit: cover; height:160px;">
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+
+
+                                                                                  
+
+
+
+                        </td>
+                        @php
+                          $hex = old('color_texto', $dom->color ?? '');
+                        @endphp
+                        <td id="color" style="min-width:180px;">
+                            <div class="d-flex align-items-center gap-8 mb-8">
+                              {{-- Swatch con color de BD --}}
+                              <span class="color-swatch border radius-4"
+                                    style="width:18px;height:18px;display:inline-block; background: {{ $hex ?: 'transparent' }};">
+                              </span>
+
+                              {{-- Preview mostrando el HEX de BD --}}
+                              <input type="text"
+                                class="form-control form-control-sm radius-4 color_texto_preview"
+                                value="{{ $hex }}"
+                                placeholder="#------"
+                                readonly
+                                style="
+                                  max-width:150px;
+                                  font-size:20px;
+                                  height:35px;
+                                  color: {{ $hex ?: '#000' }};
+                                  border-color: {{ $hex ?: '#ced4da' }};
+                                  {{ strtoupper($hex) === '#FFFFFF' ? 'background:#111827; border-color:#111827;' : '' }}
+                                ">
+                            </div>
+
+                            {{-- Hidden con el color de BD --}}
+                            <input type="hidden"
+                                  class="color_texto"
+                                  name="color_texto"
+                                  value="{{ $hex }}">
+
+                            {{-- Paleta en puntitos + marcar el guardado como activo --}}
+                            <div class="d-flex flex-wrap gap-6 paleta-texto">
+                              @foreach($paletaTexto as $c)
+                                <button type="button"
+                                  class="palette-item border radius-4 {{ strtoupper($c['hex']) === strtoupper($hex) ? 'active border-primary-600' : '' }}"
+                                  data-hex="{{ $c['hex'] }}"
+                                  data-class="{{ $c['class'] }}"
+                                  title="{{ $c['hex'] }}"
+                                  style="width:20px;height:20px;padding:0;background:{{ $c['hex'] }};">
+                                </button>
+                              @endforeach
+                            </div>
+                          </td>
+                      </tr>
+                     @endforeach
+                          
+                  </tbody>
+                </table>
+              </div>
           </div>
-        
           <div class="card-body p-24">
              
-                  <label class="form-label fw-semibold text-primary-light text-lg mb-8">
-                   Seleccione los Dominios donde aplicara los cambios
-                  </label>
-         
-            <div class="mb-24 mt-16">
-              <label class="form-label fw-semibold text-primary-light text-sm mb-8">
-                Dominios
-              </label>
-                 <div class="form-check checked-primary d-flex align-items-center gap-2 mb-16">
-                  <input
-                    class="form-check-input"
-                    type="checkbox"
-                    id="select_all_dominios"
-                    style="border-radius:50% !important;"
-                  >
-                  <label class="form-check-label line-height-1 fw-medium text-secondary-light"
-                        for="select_all_dominios">
-                    Seleccionar todos
-                  </label>
-                </div>
-              <div class="d-flex flex-wrap gap-16">
-             
-                @foreach ($dominios as $dom)
-                  <div class="form-check checked-primary d-flex align-items-center gap-2">
-                    <input class="form-check-input dominio-check" type="checkbox" name="dominios[]" id="dominio_{{ $dom->id_dominio }}"
-                        value="{{ $dom->id_dominio }}"
-                        style="border-radius:50% !important;"
-                      >
-                      <label class="form-check-label line-height-1 fw-medium text-secondary-light"
-                            for="dominio_{{ $dom->id_dominio }}">
-                        {{ $dom->nombre ?? $dom->url ?? ('Dominio ' . $dom->nombre) }}
-                      </label>
-               
-                  </div>
-                @endforeach
-              </div>
-            </div>
-            
+                
+              <input type="hidden" name="datos" id="datos">
                 <div class="d-flex align-items-center justify-content-center gap-3 mt-4">
                     <button type="button"
                             onclick="window.location.href='{{ route('dominios.index') }}'"
                             class="border border-danger-600 bg-hover-danger-200 text-danger-600 text-md px-56 py-11 radius-8">
                         Cancelar
                     </button>
-                    <button type="submit"
+                    <button type="submit" onclick="CapturarDatosTabla()"
                             class="btn btn-primary border border-primary-600 text-md px-56 py-12 radius-8">
                         Guardar
                     </button>
@@ -183,42 +192,83 @@
 @endsection
 
 @section('scripts')
+<script type="text/javascript" src="{{ asset('assets\js\IdentidadDominios.js') }}"></script>
 <script>
-  document.addEventListener('DOMContentLoaded', () => {
-    const palette = document.getElementById('paleta-texto');
-    if (!palette) return;
+document.addEventListener('DOMContentLoaded', () => {
 
-    const hidden = document.getElementById('color_texto');
-    const preview = document.getElementById('color_texto_preview');
+  // ✅ Pintar por defecto por cada fila según el hidden
+  document.querySelectorAll('#tabla_identidad tbody tr').forEach(tr => {
+    const hidden = tr.querySelector('.color_texto');
+    const preview = tr.querySelector('.color_texto_preview');
+    const swatch = tr.querySelector('.color-swatch');
+    const palette = tr.querySelector('.paleta-texto');
 
-    const setSelected = (btn) => {
-      // quitar selección previa
+    const hex = (hidden?.value || '').trim();
+    if (!hex) return;
+
+    if (preview) {
+      preview.value = hex;
+      preview.style.setProperty('color', hex, 'important');
+      preview.style.setProperty('border-color', hex, 'important');
+
+      if (hex.toUpperCase() === '#FFFFFF') {
+        preview.style.setProperty('background-color', '#111827', 'important');
+        preview.style.setProperty('border-color', '#111827', 'important');
+      } else {
+        preview.style.removeProperty('background-color');
+      }
+    }
+
+    if (swatch) swatch.style.background = hex;
+
+    // marcar activo el dot correspondiente
+    if (palette) {
       palette.querySelectorAll('.palette-item').forEach(b => {
-        b.classList.remove('active');
-        b.classList.remove('border-primary-600');
+        b.classList.toggle('active', (b.dataset.hex || '').toUpperCase() === hex.toUpperCase());
       });
-
-      // marcar seleccionado
-      btn.classList.add('active');
-      btn.classList.add('border-primary-600');
-
-      const hex = btn.dataset.hex;
-      const cls = btn.dataset.class;
-
-      // ✅ Guarda HEX (recomendado para persistir en BD)
-      hidden.value = hex;
-
-      // Vista
-      preview.value = hex + ' (' + cls + ')';
-      preview.style.color = hex;
-    };
-
-    palette.addEventListener('click', (e) => {
-      const btn = e.target.closest('.palette-item');
-      if (!btn) return;
-      setSelected(btn);
-    });
+    }
   });
+
+  // ✅ Tu listener de click (el que ya tienes)
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.palette-item');
+    if (!btn) return;
+
+    const tr = btn.closest('tr');
+    const palette = btn.closest('.paleta-texto');
+
+    const hidden = tr.querySelector('.color_texto');
+    const preview = tr.querySelector('.color_texto_preview');
+    const swatch = tr.querySelector('.color-swatch');
+
+    palette.querySelectorAll('.palette-item').forEach(b => {
+      b.classList.remove('active', 'border-primary-600');
+    });
+
+    btn.classList.add('active', 'border-primary-600');
+
+    const hex = btn.dataset.hex;
+    const cls = btn.dataset.class;
+
+    if (hidden) hidden.value = hex;
+
+    if (preview) {
+      preview.value = `${hex} (${cls})`;
+      preview.style.setProperty('color', hex, 'important');
+      preview.style.setProperty('border-color', hex, 'important');
+
+      if (hex.toUpperCase() === '#FFFFFF') {
+        preview.style.setProperty('background-color', '#111827', 'important');
+        preview.style.setProperty('border-color', '#111827', 'important');
+      } else {
+        preview.style.removeProperty('background-color');
+      }
+    }
+
+    if (swatch) swatch.style.background = hex;
+  });
+
+});
 </script>
 <script src="{{ asset('assets/js/lib/file-upload.js') }}"></script>
 
@@ -227,20 +277,7 @@
 </style>
 
 <script>
-  // Guardar el JSON path seleccionado en elementor_template_path
-  document.querySelectorAll('.tpl-select-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const path = btn.dataset.path || '';
-      if (!path) return;
-
-      const input = document.getElementById('elementor_template_path');
-      if (input) input.value = path;
-
-      document.querySelectorAll('.tpl-card').forEach(c => c.classList.remove('tpl-selected'));
-      btn.closest('.tpl-card')?.classList.add('tpl-selected');
-    });
-  });
-
+ 
   // Tu listener de imagen (queda igual)
   document.getElementById('imagen')?.addEventListener('change', function (e) {
     const file = e.target.files && e.target.files[0];
@@ -260,7 +297,26 @@
     const img = new Image();
     img.onload = () => URL.revokeObjectURL(url);
     img.src = url;
-  });
+  });document.addEventListener('change', (e) => {
+  const input = e.target;
+  if (!input.classList.contains('input-imagen')) return;
+
+  const file = input.files && input.files[0];
+  if (!file) return;
+
+  const tr = input.closest('tr');
+  const imgTag = tr.querySelector('.avatar-img');
+  const link = tr.querySelector('.popup-img');
+
+  const url = URL.createObjectURL(file);
+
+  if (imgTag) imgTag.src = url;
+  if (link) link.href = url;
+
+  const img = new Image();
+  img.onload = () => URL.revokeObjectURL(url);
+  img.src = url;
+});
 </script>
 
 <script src="{{ asset('assets/js/lib/magnifc-popup.min.js') }}"></script>
@@ -271,35 +327,7 @@
         gallery: { enabled: true }
     });
 </script>
-<script>
-  document.addEventListener('DOMContentLoaded', () => {
-    const selectAll = document.getElementById('select_all_dominios');
-    const checks = Array.from(document.querySelectorAll('.dominio-check'));
 
-    if (!selectAll || checks.length === 0) return;
-
-    // Marcar / desmarcar todos
-    selectAll.addEventListener('change', () => {
-      const checked = selectAll.checked;
-      checks.forEach(chk => chk.checked = checked);
-
-      // 🔥 aseguramos que nunca quede medio marcado
-      selectAll.indeterminate = false;
-    });
-
-    // Si se marca/desmarca uno, solo actualiza si están TODOS marcados o no
-    checks.forEach(chk => {
-      chk.addEventListener('change', () => {
-        const allChecked = checks.every(c => c.checked);
-
-        selectAll.checked = allChecked;
-
-        // 🔥 nunca medio marcado
-        selectAll.indeterminate = false;
-      });
-    });
-  });
-</script>
 @endsection
 
     

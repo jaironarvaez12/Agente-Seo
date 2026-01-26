@@ -629,6 +629,8 @@ public function verWp($id, WordpressService $wp)
 
                 // ✅ límites API (fresh)
                 $planResp = $licenses->getPlanLimitsCached($licensePlain, $host, $user->email, true);
+
+                //dd($planResp);
                 $plan   = (string) ($planResp['plan'] ?? 'free');
                 $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
 
@@ -1312,33 +1314,23 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     }
     public function ActulizarIdentidadDominios(Request $request)
     {
-        $request->validate([
-            'dominios'    => 'required|array',
-            'dominios.*'  => 'required|integer',
-            'imagen'      => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
-            'color_texto' => 'nullable|string',
-        ]);
+    
 
-        $dominioIds  = $request->input('dominios', []);
-        $tieneImagen = $request->hasFile('imagen');
+        // 1) Leer JSON (tu lógica)
+        $dominios = json_decode($request->input('datos'));
 
-        // ✅ Preparamos la imagen UNA SOLA VEZ para reusarla en todos los dominios
-        $jpgBytes = null;
-        if ($tieneImagen) {
-            $file = $request->file('imagen');
-
-            if (!$file->isValid()) {
-                return back()->withError('Upload falló: ' . $file->getErrorMessage())->withInput();
-            }
-
-            $img = Image::read($file->getRealPath())->cover(400, 400);
-            $jpgBytes = $img->encodeByExtension('jpg', quality: 85);
+        if (!$dominios || !is_array($dominios)) {
+            return back()->withError('El JSON de "datos" no es válido.')->withInput();
         }
 
-        foreach ($dominioIds as $idDominio) {
+        // 2) Detectar si vienen imágenes (tu lógica, pero con el nombre correcto)
+        // En tu form: name="imagenes[{{ $id }}]"
+        $tieneImagen = $request->hasFile('imagenes');
+
+        foreach ($dominios as $dominio) {
             try {
                 $destino = "images/dominios/dominio/";
-                $carpeta = $idDominio;
+                $carpeta = $dominio->id_dominio;
 
                 $rutaCarpeta = public_path($destino . $carpeta);
 
@@ -1346,27 +1338,49 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
                     File::makeDirectory($rutaCarpeta, 0777, true);
                 }
 
-                // ✅ Guardar imagen (si viene) sin mover el archivo original
+                // ✅ Buscar imagen de ESTE dominio (si vino)
+                $jpgBytes = null;
                 $nombreImagen = null;
-                if ($tieneImagen && $jpgBytes) {
-                    $nombreImagen = $idDominio . '.jpg';
+
+                if ($tieneImagen && $request->hasFile("imagenes.$carpeta")) {
+                    $file = $request->file("imagenes.$carpeta");
+
+                    if (!$file->isValid()) {
+                        return back()
+                            ->withError('Upload falló para dominio ' . $carpeta . ': ' . $file->getErrorMessage())
+                            ->withInput();
+                    }
+
+                    // Preparar imagen (misma lógica, pero por dominio)
+                    $img = Image::read($file->getRealPath())->cover(400, 400);
+                    $jpgBytes = $img->encodeByExtension('jpg', quality: 85);
+
+                    // Guardar imagen
+                    $nombreImagen = $carpeta . '.jpg';
                     $rutaImagen = $rutaCarpeta . DIRECTORY_SEPARATOR . $nombreImagen;
                     File::put($rutaImagen, $jpgBytes);
                 }
 
-                // Actualizar BD
-                $dominioModel = DominiosModel::findOrFail($idDominio);
-                $dominioModel->color = $request->input('color_texto');
-                $dominioModel->direccion = $request->input('nombre');
+                // 3) Actualizar BD (tu lógica)
+                $dominioModel = DominiosModel::find($carpeta);
 
-                if ($tieneImagen && $nombreImagen) {
+            
+
+                $dominioModel->fill([
+                    'color' => $dominio->color,
+                    'direccion' => $dominio->direccion,
+                ]);
+
+                if ($nombreImagen) {
                     $dominioModel->imagen = $destino . $carpeta . '/' . $nombreImagen;
                 }
 
                 $dominioModel->save();
 
             } catch (\Exception $ex) {
-                return back()->withError('Ocurrió un error al actualizar el dominio ID ' . $idDominio . ': ' . $ex->getMessage())->withInput();
+                return back()
+                    ->withError('Ocurrió un error al actualizar la identidad del Dominio ' . ($dominio->nombre_dominio ?? 'N/A') . ': ' . $ex->getMessage())
+                    ->withInput();
             }
         }
 
