@@ -5,7 +5,7 @@ namespace App\Services;
 use App\Models\LicenciaDominiosActivacionModel;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
-
+use Carbon\Carbon;
 class LicenseService
 {
     /**
@@ -118,14 +118,12 @@ class LicenseService
      * - Usa validateOrActivate para evitar caer en "free"
      * - Cachea con ttl recomendado por el server
      */
-    public function getPlanLimitsCached(string $licenseKey, string $domain, ?string $email = null, bool $force = false): array
+  public function getPlanLimitsCached(string $licenseKey, string $domain, ?string $email = null, bool $force = false): array
 {
     $domain = $this->host($domain);
     $cacheKey = "license:limits:" . sha1($licenseKey . '|' . $domain);
 
-    if ($force) {
-        Cache::forget($cacheKey);
-    }
+    if ($force) Cache::forget($cacheKey);
 
     if (!$force && ($cached = Cache::get($cacheKey))) {
         return $cached;
@@ -134,9 +132,9 @@ class LicenseService
     $resp = $this->validateOrActivate($licenseKey, $domain, $email);
 
     $payload = [
-        'plan' => (string) data_get($resp, 'plan', 'free'),
+        'plan'   => (string) data_get($resp, 'plan', 'free'),
         'limits' => (array) data_get($resp, 'limits', []),
-        'raw' => $resp,
+        'raw'    => $resp,
     ];
 
     $ttl = (int) data_get($resp, 'cache.recommended_ttl', 43200);
@@ -287,14 +285,161 @@ class LicenseService
      * Helper listo para usar en queries de cupo:
      * devuelve [$desde, $hasta] (Carbon|null)
      */
-    public function licenseUsageRange(array $planResp): array
-    {
-        $w = $this->licenseWindow($planResp);
+    
 
-        // Si no hay start, usa created_at; si no, usa inicio del día de hoy (fallback)
-        $desde = $w['start'] ?: now()->startOfDay();
-        $hasta = $w['end']; // puede ser null
 
-        return [$desde, $hasta, $w];
+    public function getPlanLimitsSmart(string $licenseKey, string $domain, ?string $email = null): array
+{
+    $domain = $this->host($domain);
+
+    // 1) primero cache normal
+    $cached = $this->getPlanLimitsCached($licenseKey, $domain, $email, false);
+
+    $raw = (array) data_get($cached, 'raw', $cached);
+
+    $nextCheckAt = data_get($raw, 'cache.next_check_at');
+    $validityEnd = data_get($raw, 'validity_end') ?? data_get($raw, 'expires_at');
+    $validityStart = data_get($raw, 'validity_start') ?? data_get($raw, 'created_at');
+
+    $nowUtc = now('UTC');
+
+    $nextCheck = $nextCheckAt ? Carbon::parse($nextCheckAt)->utc() : null;
+    $end = $validityEnd ? Carbon::parse($validityEnd)->utc() : null;
+    $start = $validityStart ? Carbon::parse($validityStart)->utc() : null;
+
+    // 2) refrescar si:
+    // - el server dice que ya toca revisar
+    // - ya expiró
+    // - la vigencia empieza en el futuro (a veces API cambia a periodo nuevo futuro)
+    // - faltan datos de ventana (para no calcular mal cuotas)
+    $mustRefresh =
+        (!$start || !$end) ||
+        ($nextCheck && $nowUtc->greaterThanOrEqualTo($nextCheck)) ||
+        ($end && $nowUtc->greaterThanOrEqualTo($end)) ||
+        ($start && $nowUtc->lessThan($start));
+
+    if ($mustRefresh) {
+        return $this->getPlanLimitsCached($licenseKey, $domain, $email, true);
     }
+
+    return $cached;
+}
+
+/**
+ * Devuelve:
+ *  - $desde (Carbon UTC)
+ *  - $hasta (Carbon UTC o null)
+ *  - $w info: is_active, start, end, status, source
+ */
+public function licenseUsageRange(array $planResp): array
+{
+    $raw = (array) data_get($planResp, 'raw', $planResp);
+
+    $startStr = data_get($raw, 'validity_start') ?? data_get($raw, 'created_at') ?? null;
+    $endStr   = data_get($raw, 'validity_end')   ?? data_get($raw, 'expires_at') ?? null;
+
+    $start = $startStr ? Carbon::parse($startStr)->utc() : null;
+    $end   = $endStr   ? Carbon::parse($endStr)->utc()   : null;
+
+    $valid  = (bool) data_get($raw, 'valid', false);
+    $active = (bool) data_get($raw, 'active', false);
+    $status = strtolower((string) data_get($raw, 'status', ''));
+
+    $nowUtc = now('UTC');
+
+    // status aceptados como “activa”
+    $statusOk = in_array($status, ['active', 'trial', 'grace', 'valid'], true);
+
+    // si no hay start/end, bloqueamos para no “inventar” ventanas
+    if (!$start || !$end) {
+        return [
+            $start ?: $nowUtc->copy()->startOfDay(),
+            $end,
+            [
+                'is_active' => false,
+                'start' => $start,
+                'end' => $end,
+                'status' => $status,
+                'reason' => 'missing_validity_window',
+            ],
+        ];
+    }
+
+    $isActive =
+        $valid && $active && $statusOk &&
+        $nowUtc->greaterThanOrEqualTo($start) &&
+        $nowUtc->lessThan($end);
+
+    return [
+        $start,
+        $end,
+        [
+            'is_active' => $isActive,
+            'start' => $start,
+            'end' => $end,
+            'status' => $status,
+            'reason' => $isActive ? 'ok' : 'out_of_window_or_inactive',
+        ],
+    ];
+}
+
+
+public function getPlanLimitsAuto(string $licenseKey, string $domain, ?string $email = null): array
+{
+    $domain = $this->host($domain);
+
+    // 1) cache primero
+    $cached = $this->getPlanLimitsCached($licenseKey, $domain, $email, false);
+    $raw = (array) data_get($cached, 'raw', $cached);
+
+    $nowUtc = now('UTC');
+
+    // Señales del server
+    $nextCheckAt = data_get($raw, 'cache.next_check_at');
+    $nextCheck = $nextCheckAt ? Carbon::parse($nextCheckAt)->utc() : null;
+
+    // Ventana de vigencia (tu API)
+    $startStr = data_get($raw, 'validity_start') ?? data_get($raw, 'created_at');
+    $endStr   = data_get($raw, 'validity_end')   ?? data_get($raw, 'expires_at');
+
+    $start = $startStr ? Carbon::parse($startStr)->utc() : null;
+    $end   = $endStr   ? Carbon::parse($endStr)->utc()   : null;
+
+    $status = strtolower((string) data_get($raw, 'status', ''));
+    $valid  = (bool) data_get($raw, 'valid', false);
+    $active = (bool) data_get($raw, 'active', false);
+
+    // 2) decisiones de refresh automático
+    $mustRefresh = false;
+
+    // A) el server dice que ya toca consultar de nuevo
+    if ($nextCheck && $nowUtc->greaterThanOrEqualTo($nextCheck)) {
+        $mustRefresh = true;
+    }
+
+    // B) cache dice “expired/inactive/invalid”
+    // (si el usuario renovó, aquí se arregla solo)
+    if (in_array($status, ['expired','inactive','invalid'], true) || !$valid || !$active) {
+        $mustRefresh = true;
+    }
+
+    // C) la ventana ya venció o aún no inicia (para capturar cambios de periodo)
+    if ($start && $nowUtc->lessThan($start)) {
+        $mustRefresh = true;
+    }
+    if ($end && $nowUtc->greaterThanOrEqualTo($end)) {
+        $mustRefresh = true;
+    }
+
+    // D) si faltan datos de ventana, refresca (mejor seguro)
+    if (!$start || !$end) {
+        $mustRefresh = true;
+    }
+
+    if (!$mustRefresh) return $cached;
+
+    // 3) refresh real
+    return $this->getPlanLimitsCached($licenseKey, $domain, $email, true);
+}
+
 }

@@ -73,7 +73,7 @@ class SeoReportController extends Controller
                 $host = $this->hostFromUrl($dominio->url);
 
                 // ✅ límites API (fresh)
-                $planResp = $licenses->getPlanLimitsCached($licensePlain, $host, $user->email, true);
+                $planResp = $licenses->getPlanLimitsAuto($licensePlain, $host, $user->email);
                 $plan   = (string) ($planResp['plan'] ?? 'free');
                 $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
 
@@ -93,7 +93,7 @@ class SeoReportController extends Controller
                 [$desde, $hasta, $w] = $licenses->licenseUsageRange($planResp);
 
                 if (!$w['is_active']) {
-                    $endTxt = $w['end'] ? $w['end']->toDateTimeString() : 'N/D';
+                    $endTxt = $w['end'] ? $w['end']->setTimezone(config('app.timezone'))->format('d/m/Y h:i A') : 'N/D';
                     return [false, "Licencia inactiva o vencida. Expira: {$endTxt}. No puedes generar reportes.", null];
                 }
 

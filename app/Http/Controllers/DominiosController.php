@@ -628,7 +628,7 @@ public function verWp($id, WordpressService $wp)
             $host = $this->hostFromUrl($dominio->url);
 
             // ✅ límites API (fresh)
-            $planResp = $licenses->getPlanLimitsCached($licensePlain, $host, $user->email, true);
+            $planResp = $licenses->getPlanLimitsAuto($licensePlain, $host, $user->email);
 
             $plan   = (string) ($planResp['plan'] ?? 'free');
             $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
@@ -639,10 +639,10 @@ public function verWp($id, WordpressService $wp)
             }
 
             // ✅ rango real de vigencia (validity_start / validity_end)
-            [$desde, $hasta, $w] = $licenses->licenseUsageRange($planResp);
+           [$desde, $hasta, $w] = $licenses->licenseUsageRange($planResp);
 
             if (!$w['is_active']) {
-                $endTxt = $w['end'] ? $w['end']->toDateTimeString() : 'N/D';
+                $endTxt = $w['end'] ? $w['end']->setTimezone(config('app.timezone'))->format('d/m/Y h:i A') : 'N/D';
                 return [false, "Tu licencia no está activa o está vencida. Expira: {$endTxt}.", []];
             }
 
