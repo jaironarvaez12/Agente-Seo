@@ -255,4 +255,46 @@ class LicenseService
         $cacheKey = "license:limits:" . sha1($licenseKey . '|' . $domain);
         Cache::forget($cacheKey);
     }
+
+
+    public function licenseWindow(array $planResp): array
+    {
+        $raw = (array) ($planResp['raw'] ?? []);
+
+        $valid = (bool) ($raw['valid'] ?? false);
+        $active = (bool) ($raw['active'] ?? false);
+        $status = strtolower((string) ($raw['status'] ?? ''));
+
+        // ✅ prioridad: validity_start/end; fallback: created_at/expires_at
+        $startRaw = $raw['validity_start'] ?? ($raw['created_at'] ?? null);
+        $endRaw   = $raw['validity_end']   ?? ($raw['expires_at'] ?? null);
+
+        $start = $startRaw ? \Carbon\Carbon::parse($startRaw) : null;
+        $end   = $endRaw   ? \Carbon\Carbon::parse($endRaw)   : null;
+
+        // activa si (valid && active && status=active) y no expirada por fecha
+        $isActive = $valid && $active && ($status === 'active') && ($end ? now()->lt($end) : true);
+
+        return [
+            'is_active' => (bool) $isActive,
+            'status'    => $status,
+            'start'     => $start,
+            'end'       => $end,
+        ];
+    }
+
+    /**
+     * Helper listo para usar en queries de cupo:
+     * devuelve [$desde, $hasta] (Carbon|null)
+     */
+    public function licenseUsageRange(array $planResp): array
+    {
+        $w = $this->licenseWindow($planResp);
+
+        // Si no hay start, usa created_at; si no, usa inicio del día de hoy (fallback)
+        $desde = $w['start'] ?: now()->startOfDay();
+        $hasta = $w['end']; // puede ser null
+
+        return [$desde, $hasta, $w];
+    }
 }

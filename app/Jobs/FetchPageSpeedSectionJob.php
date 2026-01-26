@@ -24,6 +24,16 @@ class FetchPageSpeedSectionJob implements ShouldQueue
 
     public function handle(): void
     {
+        if (env('MOZ_MOCK', false)) {
+            $report = SeoReport::findOrFail($this->reportId);
+
+            // opcional: guardar fake
+            // $report->update([
+            //   'moz_keywords_json' => json_encode(['mock' => true, 'count' => count($this->keywords)])
+            // ]);
+
+            return;
+        }
         try {
             $report = SeoReport::findOrFail($this->reportId);
             $dominio = DominiosModel::findOrFail($report->id_dominio);

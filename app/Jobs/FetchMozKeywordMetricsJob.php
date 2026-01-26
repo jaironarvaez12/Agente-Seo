@@ -33,6 +33,16 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
 
     public function handle(MozJsonRpc $moz): void
     {
+        if (env('MOZ_MOCK', false)) {
+            $report = SeoReport::findOrFail($this->reportId);
+
+            // opcional: guardar fake
+            // $report->update([
+            //   'moz_keywords_json' => json_encode(['mock' => true, 'count' => count($this->keywords)])
+            // ]);
+
+            return;
+        }
         $report = SeoReport::findOrFail($this->reportId);
 
         // ✅ normaliza + quita duplicados (incluye tildes)

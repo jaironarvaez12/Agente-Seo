@@ -24,6 +24,17 @@ class FetchMozSectionJob implements ShouldQueue
 
     public function handle(MozClient $moz): void
     {
+        if (env('MOZ_MOCK', false)) {
+            $report = SeoReport::findOrFail($this->reportId);
+
+            // ✅ opcional: guarda un “resultado fake” para que la vista no quede vacía
+            // Ajusta estas columnas a las tuyas reales:
+            // $report->update([
+            //     'moz_section_json' => json_encode(['mock' => true, 'ts' => now()->toIso8601String()]),
+            // ]);
+
+            return; // ⛔ NO llama a Moz
+        }
         $report = SeoReport::findOrFail($this->reportId);
         $dominio = DominiosModel::findOrFail($report->id_dominio);
 
