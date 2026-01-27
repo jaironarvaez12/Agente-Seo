@@ -674,7 +674,7 @@ public function verWp($id, WordpressService $wp)
                 ->whereIn('tipo', ['post','page'])
                 ->where('created_at', '>=', $desde)
                 ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
-                ->whereIn('estatus', ['encolado','en_proceso','generado'])
+                ->whereIn('estatus', ['encolado','en_proceso','generado','programado','publicado'])
                 ->count();
 
             if ($ocupadosDominio >= $maxContent) {
@@ -712,7 +712,7 @@ public function verWp($id, WordpressService $wp)
                 ->whereIn('tipo', ['post','page'])
                 ->where('created_at', '>=', $desde)
                 ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
-                ->whereIn('estatus', ['encolado','en_proceso','generado'])
+                ->whereIn('estatus', ['encolado','en_proceso','generado','programado','publicado'])
                 ->count();
 
             if ($ocupadosGlobal >= $maxGlobal) {
