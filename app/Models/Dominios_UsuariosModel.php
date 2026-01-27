@@ -37,6 +37,7 @@ class Dominios_UsuariosModel extends Model
                     'd.color',
                     'd.imagen',
                     'd.direccion',
+                    'd.estatus'
                     )
                 ->where('du.id_usuario', '=', $IdUsuario)
                 ->get();

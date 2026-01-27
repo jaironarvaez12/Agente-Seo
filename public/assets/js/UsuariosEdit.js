@@ -77,11 +77,11 @@ $(document).on('click', '.borrar', function(event) {
     event.preventDefault();
     $(this).closest('tr').remove();
 });
-function EliminarTiendas(id)
+function EliminarDominios(id)
 {
     $.ajax({
         // dataType: "JSON",
-        url: eliminartienda+'/'+id,
+        url: eliminardominio+'/'+id,
         type: 'post',
         data:
         {

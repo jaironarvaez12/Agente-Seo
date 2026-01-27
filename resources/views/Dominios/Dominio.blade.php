@@ -114,34 +114,7 @@
                                                 </button>
                                             </form>
                                         @endif      
-                                        {{-- <a href="{{ route('dominioscrearcontenido', $perfil->id_dominio) }}" 
-                                            title="Crear"
-                                            class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px 
-                                                d-flex justify-content-center align-items-center rounded-circle">
-                                            <iconify-icon icon="lucide:plus" class="menu-icon"></iconify-icon>
-                                        </a>
-                                        <a href="{{ route('dominios.wp', $perfil->id_dominio) }}" 
-                                            title="CONTENIDO"
-                                            class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px 
-                                                d-flex justify-content-center align-items-center rounded-circle">
-                                            <iconify-icon icon="lucide:plus" class="menu-icon"></iconify-icon>
-                                        </a>
-                                     
-                                        <form action="{{ route('generador', $perfil->id_dominio) }}" method="POST" style="display:inline;">
-                                        @csrf
-                                        <button type="submit"
-                                            title="GENERADOR"
-                                            class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px 
-                                                d-flex justify-content-center align-items-center rounded-circle border-0">
-                                            <iconify-icon icon="lucide:plus" class="menu-icon"></iconify-icon>
-                                        </button>
-                                        </form>
-
-                                        <a href="{{ route('dominios.contenido_generado', $perfil->id_dominio) }}"
-                                            class="btn btn-outline-info btn-sm">
-                                            Ver contenido generado
-                                        </a> --}}
-
+                                       
                                        
 
                                     </div>

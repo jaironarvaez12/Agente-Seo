@@ -69,7 +69,7 @@
                       
                           <textarea class="form-control radius-8 direccion"
                             name="direcciones[{{ $dom->id_dominio }}]"
-                            rows="4">{{ old('direcciones.'.$dom->id_dominio, $dom->direccion ?? '') }}</textarea>
+                            rows="4" placeholder="Ingresa Datos de ubicacion o Direccion">{{ old('direcciones.'.$dom->id_dominio, $dom->direccion ?? '') }}</textarea>
                         </td>
                         <td id="imagen">
                           <div class="mb-24 mt-16">

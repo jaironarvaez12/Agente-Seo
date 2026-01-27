@@ -56,8 +56,7 @@ class UsuariosController extends Controller
         $usuario->name = strtoupper($request['name']);
         $usuario->email = $request['email'];
         $usuario->password = Hash::make($request['contraseña']);
-        $usuario->id_empresa = $request->id_empresa;
-     
+    
     
        
        
@@ -109,17 +108,27 @@ class UsuariosController extends Controller
 
     public function edit($id)
     {
+        $usuario = User::findOrFail($id);
 
-        $usuario = User::find($id);
-   
-        $permisos = Permission::select('id', 'name')->orderBy('name')->get(); //trae todo el listado de permiso
-  
-        $roles = Role::select('id', 'name')->get(); //trae los roles para el usuario
-          
+        $permisos = Permission::select('id', 'name')->orderBy('name')->get();
+        $roles    = Role::select('id', 'name')->get();
+
+        // Dominios ya asignados a ESTE usuario (para excluirlos del select)
+        $idsDominiosAsignados = Dominios_UsuariosModel::where('id_usuario', $id)
+            ->pluck('id_dominio');
+
+        $query = DominiosModel::whereNotIn('id_dominio', $idsDominiosAsignados);
+
+        // Si NO es admin, solo ve los dominios creados por él
+        if (Auth::user()->roles[0]->name != 'administrador') {
+            $query->where('creado_por', Auth::id());
+        }
+
+        $dominios = $query->get();
+
         $DominiosUsuario = Dominios_UsuariosModel::Dominios($id);
-        $dominios = DominiosModel::all();
 
-         return view('Usuarios.UsuariosEdit', compact('usuario','permisos','roles','DominiosUsuario','dominios'));
+        return view('Usuarios.UsuariosEdit', compact('usuario','permisos','roles','DominiosUsuario','dominios'));
     }
 
 
@@ -249,6 +258,19 @@ class UsuariosController extends Controller
             return redirect("usuarios")->withError('Error Al Activar El Usuario '.$ex->getMessage());
         }
         return redirect("usuarios")->withSuccess('El Usuario Ha Sido Activado Exitosamente');
+    }
+     public function EliminarDominio($IdDominioUsuario)
+    {
+         try
+         {
+            Dominios_UsuariosModel::destroy($IdDominioUsuario);
+         }
+         catch (Exception $e)
+         {
+             return back()->withError('Error Al Eliminar');
+         }
+ 
+         return back()->with('');
     }
    
 }

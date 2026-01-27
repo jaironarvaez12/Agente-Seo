@@ -26,7 +26,7 @@ class UsuariosCreateRequest extends FormRequest
             'email' => 'required|email|unique:users,email',
             'contraseña' => 'required|min:4',
           
-            'id_empresa' => 'required|not_in:0',
+            
             'roles' => 'required|not_in:0'
         ];
     }

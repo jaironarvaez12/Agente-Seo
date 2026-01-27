@@ -56,7 +56,7 @@
                                     <textarea class="form-control radius-8" id="url" name="url"
                                             rows="2" placeholder="https://ideiweb.com/">{{ old('url') }}</textarea>
                                 </div>
-                                 <div class="mb-20">
+                                 {{-- <div class="mb-20">
                                     <label for="nombre" class="form-label fw-semibold text-primary-light text-sm mb-8">
                                        Usuario<span class="text-danger-600">*</span>
                                     </label>
@@ -69,7 +69,7 @@
                                        Contraseña<span class="text-danger-600">*</span>
                                     </label>
                                       <input type="password" class="form-control radius-8" id="password" name="password" placeholder="Ingrese su contraseña ">
-                                </div>
+                                </div> --}}
 
                                 <div class="d-flex align-items-center justify-content-center gap-3 mt-4">
                                     <button type="button"

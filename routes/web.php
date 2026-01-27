@@ -43,7 +43,7 @@ Route::group(['middleware' => 'auth'], function(){
     Route::get('dominioeditartipogenerador/{id_dominio_contenido}', [App\Http\Controllers\DominiosController::class, 'EditarTipoGenerador'])->name('dominioeditartipogenerador');
     Route::post('dominioguardarediciontipo/{id_dominio_contenido}', [App\Http\Controllers\DominiosController::class, 'GuardarEditarTipoGenerador'])->name('dominioguardarediciontipo');
 
-
+ Route::delete('eliminardominio/{id}',[App\Http\Controllers\UsuariosController::class, 'EliminarDominio'])->name('eliminardominio');
 
 
 Route::post('/wp/webhook', [App\Http\Controllers\WordpressWebhookController::class, 'handle']);

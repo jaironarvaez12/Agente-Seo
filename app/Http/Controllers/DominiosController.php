@@ -89,10 +89,24 @@ class DominiosController extends Controller
         return $count;
     }
     public function index()
-    {
-        
-    $dominios = DominiosModel::all();
+{
+    $userId = Auth::id();
 
+    if (Auth::user()->roles[0]->name == 'administrador') {
+        $dominios = DominiosModel::all();
+    } else {
+
+        // IDs de dominios asignados al usuario (tabla pivote)
+        $idsAsignados = Dominios_UsuariosModel::where('id_usuario', $userId)
+            ->pluck('id_dominio');
+
+        // Dominios que (a) están asignados al usuario o (b) fueron creados por él
+        $dominios = DominiosModel::whereIn('id_dominio', $idsAsignados)
+            ->orWhere('creado_por', $userId)
+            ->get();
+    }
+
+    // --- lo tuyo de licencias igual ---
     $user = auth()->user();
 
     $plan = 'pro';
@@ -113,7 +127,8 @@ class DominiosController extends Controller
     }
 
     return view('Dominios.Dominio', compact('dominios', 'plan', 'max', 'used', 'remaining'));
-    }
+}
+
 
     /**
      * Show the form for creating a new resource.
@@ -208,8 +223,8 @@ class DominiosController extends Controller
                 'url' => $request['url'],
                 'nombre' => strtoupper($request['nombre']),
                 'estatus' => strtoupper('SI'),
-                'usuario' => $request['usuario'],
-                'password' => Crypt::encryptString($request->input('password')),
+         
+                'creado_por' => Auth::user()->id,
             ]);
 
             $resp = $licenses->activarYRegistrar(
@@ -1319,7 +1334,20 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     }
     public function IdentidadDominios()
     {
-        $dominios= Dominios_UsuariosModel::Dominios(Auth::user()->id);
+         $userId = Auth::id();
+        if (Auth::user()->roles[0]->name == 'administrador') {
+            $dominios = DominiosModel::all();
+        } else {
+
+            // IDs de dominios asignados al usuario (tabla pivote)
+            $idsAsignados = Dominios_UsuariosModel::where('id_usuario', $userId)
+                ->pluck('id_dominio');
+
+            // Dominios que (a) están asignados al usuario o (b) fueron creados por él
+            $dominios = DominiosModel::whereIn('id_dominio', $idsAsignados)
+                ->orWhere('creado_por', $userId)
+                ->get();
+        }
         
 
         return view('Dominios.DominioIdentidad', compact('dominios'));

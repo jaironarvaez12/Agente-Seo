@@ -83,11 +83,7 @@
                                         <input type="text" class="form-control radius-8 @error('email') is-invalid @enderror"
                                             name="email" value=" {{ old('email', $usuario->email ?? '') }}"placeholder="Ingrese su correo">
                                     </div>
-                                    {{-- <div class="mb-20">
-                                        <label for="number" class="form-label fw-semibold text-primary-light text-sm mb-8">Telefono</label>
-                                        <input type="text" class="form-control radius-8" id="telefono" name="telefono" placeholder="Ingrese su telefono">
-                                        
-                                    </div> --}}
+                                  
                                     <div class="mb-20">
                                         <label class="form-label fw-semibold text-primary-light text-sm mb-8">
                                             Licencia (dejar vacío si no se cambia)
@@ -102,14 +98,14 @@
 
                                         <div class="mb-20">
                                         <label class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                            Email de licencia (opcional)
+                                            Email de licencia 
                                         </label>
 
                                         <input type="text"
                                                 class="form-control radius-8 @error('license_email') is-invalid @enderror"
                                                 name="license_email"
                                                 value="{{ old('license_email', $usuario->license_email ?? '') }}"
-                                                placeholder="email del cliente (opcional)">
+                                                placeholder="email del cliente">
                                         </div>
                                     
                                     <div class="mb-20">
@@ -177,7 +173,7 @@
 
 
                                                             <button type="button"
-                                                                    onclick="EliminarTiendas({{$dominio->id_dominio_usuario}})"
+                                                                    onclick="EliminarDominios({{$dominio->id_dominio_usuario}})"
                                                                     class="borrar remove-item-btn bg-danger-focus bg-hover-danger-200 text-danger-600 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle">
                                                                 <iconify-icon icon="fluent:delete-24-regular" class="menu-icon"></iconify-icon>
                                                             </button>
@@ -217,7 +213,7 @@
 @section('scripts')
 <script>
     var obtenertienda = "{{ url('obtenertienda') }}"; 
-    var eliminartienda= "{{ url('eliminartienda') }}";
+    var eliminardominio= "{{ url('eliminardominio') }}";
 </script>
 <script type="text/javascript" src="{{ asset('assets\js\UsuariosEdit.js') }}"></script>
 @endsection
