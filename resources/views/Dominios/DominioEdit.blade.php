@@ -84,7 +84,7 @@
                                 </div>
                             </div>
                             <!-- Upload Image End -->
-                                <div class="mb-20">
+                                {{-- <div class="mb-20">
                                     <label for="usuario" class="form-label fw-semibold text-primary-light text-sm mb-8">
                                         Usuario<span class="text-danger-600">*</span>
                                     </label>
@@ -98,7 +98,7 @@
                                     </label>
                                     <input type="password" class="form-control radius-8" id="password" name="password"
                                            placeholder="Ingrese su contraseña ">
-                                </div>
+                                </div> --}}
 
                                 {{-- ============================================
                                    PLANTILLAS (WP) -> Guarda elementor_template_path

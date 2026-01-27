@@ -694,12 +694,17 @@ public function verWp($id, WordpressService $wp)
             $maxGlobal = $maxActiveDomains * $maxContent;
 
             $dominiosIdsDelUser = DB::table('dominios_usuarios')
-                ->where('id_usuario', (int)$user->id)
+                ->where('id_usuario', (int) $user->id)
                 ->pluck('id_dominio')
-                ->map(fn($v) => (int)$v)
+                ->map(fn ($v) => (int) $v)
                 ->all();
 
-            if (!in_array((int)$IdDominio, $dominiosIdsDelUser, true)) {
+            $esCreadorDelDominio = DB::table('dominios')
+                ->where('id_dominio', (int) $IdDominio)
+                ->where('creado_por', (int) $user->id) // <-- ajusta si tu columna se llama distinto
+                ->exists();
+
+            if (!in_array((int) $IdDominio, $dominiosIdsDelUser, true) && !$esCreadorDelDominio) {
                 return [false, 'No tienes permiso para generar contenido en este dominio.', []];
             }
 

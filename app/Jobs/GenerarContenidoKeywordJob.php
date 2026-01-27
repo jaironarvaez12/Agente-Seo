@@ -254,39 +254,176 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
     // ========================= TEMPLATE LOADER =========================
     private function loadElementorTemplateForDomainWithPath(int $idDominio): array
-    {
-        $dominio = DominiosModel::where('id_dominio', $idDominio)->first();
-        if (!$dominio) throw new \RuntimeException("NO_RETRY: Dominio no encontrado (id={$idDominio})");
+{
+    $dominio = DominiosModel::where('id_dominio', $idDominio)->first();
+    if (!$dominio) throw new \RuntimeException("NO_RETRY: Dominio no encontrado (id={$idDominio})");
 
-        $templateRel = trim((string)($dominio->elementor_template_path ?? ''));
-        if ($templateRel === '') $templateRel = trim((string)env('ELEMENTOR_TEMPLATE_PATH', ''));
+    $templateRel = trim((string)($dominio->elementor_template_path ?? ''));
 
-        // ✅ estándar
-        if ($templateRel === '') $templateRel = 'elementor/elementor-179-2025-12-27.json';
+    // ✅ SI NO HAY PLANTILLA SELECCIONADA => HTML PLANO (sin cambiar tu lógica)
+    if ($templateRel === '') {
+        // OJO: esto NO es un json real de Elementor,
+        // pero cumple tu contrato interno: array con 'content' y strings con tokens {{TOKEN}}
+        // para que: collectTokensMeta -> generateValues... -> fillTemplateTokens... sigan igual.
+        $tpl = [
+            'content' => [
+                [
+                    'title' => '{{SEO_TITLE}}',
+                ],
+                [
+                    'editor' => <<<HTML
+<!-- Título SEO (≤ 60 caracteres): {{SEO_TITLE}} -->
 
-        $templateRel = str_replace(['https:', 'http:'], '', $templateRel);
-        if (preg_match('~^https?://~i', $templateRel)) {
-            $u = parse_url($templateRel);
-            $templateRel = $u['path'] ?? $templateRel;
-        }
+<div class="container">
+  <div class="row">
+    <div class="col-md-12">
+      <h1>{{HERO_H1}}</h1>
+      <p>{{INTRO_P}}</p>
+    </div>
+  </div>
+</div>
 
-        $templateRel = preg_replace('~^/?storage/app/~i', '', $templateRel);
-        $templateRel = ltrim(str_replace('\\', '/', $templateRel), '/');
+<div class="container">
+  <div class="row">
+    <div class="col-md-12">
+      <h2>{{SECTION_1_TITLE}}</h2>
+      <p>{{SECTION_1_P}}</p>
+    </div>
+  </div>
+</div>
 
-        if (str_contains($templateRel, '..')) throw new \RuntimeException('NO_RETRY: Template path inválido (no se permite "..")');
+<div class="container">
+  <div class="row">
+    <div class="col-md-6">
+      <h3>{{SECTION_2_TITLE}}</h3>
+      <p>{{SECTION_2_P}}</p>
+    </div>
+    <div class="col-md-6">
+      <h3>{{SECTION_3_TITLE}}</h3>
+      <p>{{SECTION_3_P}}</p>
+    </div>
+  </div>
+</div>
 
-        $templatePath = storage_path('app/' . $templateRel);
-        if (!is_file($templatePath)) throw new \RuntimeException("NO_RETRY: No existe el template en disco: {$templatePath}");
+<div class="container">
+  <div class="row">
+    <div class="col-md-12">
+      <h2>{{SECTION_4_TITLE}}</h2>
+      <p>{{SECTION_4_P}}</p>
+    </div>
+  </div>
+</div>
 
-        $raw = (string) file_get_contents($templatePath);
-        $tpl = json_decode($raw, true);
+<div class="container">
+  <div class="row">
+    <div class="col-md-4">
+      <h3>{{SECTION_5_TITLE}}</h3>
+      <p>{{SECTION_5_P}}</p>
+    </div>
+    <div class="col-md-4">
+      <h3>{{SECTION_6_TITLE}}</h3>
+      <p>{{SECTION_6_P}}</p>
+    </div>
+    <div class="col-md-4">
+      <h3>{{SECTION_7_TITLE}}</h3>
+      <p>{{SECTION_7_P}}</p>
+    </div>
+  </div>
+</div>
 
-        if (!is_array($tpl) || !isset($tpl['content']) || !is_array($tpl['content'])) {
-            throw new \RuntimeException('NO_RETRY: Template Elementor inválido: debe contener "content" (array).');
-        }
+<div class="container">
+  <div class="row">
+    <div class="col-md-12">
+      <h2>{{SECTION_8_TITLE}}</h2>
+      <p>{{SECTION_8_P}}</p>
+    </div>
+  </div>
+</div>
 
-        return [$tpl, $templatePath];
+<div class="container">
+  <div class="row">
+    <div class="col-md-4">
+      <h3>{{SECTION_9_TITLE}}</h3>
+      <p>{{SECTION_9_P}}</p>
+    </div>
+    <div class="col-md-4">
+      <h3>{{SECTION_10_TITLE}}</h3>
+      <p>{{SECTION_10_P}}</p>
+    </div>
+    <div class="col-md-4">
+      <h3>{{SECTION_11_TITLE}}</h3>
+      <p>{{SECTION_11_P}}</p>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="row">
+    <div class="col-md-12">
+      <h2>{{FAQ_TITLE}}</h2>
+      <p>{{FAQ_INTRO}}</p>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="row">
+    <div class="col-md-4">
+      <h3>{{FAQ_1_Q}}</h3>
+      <p>{{FAQ_1_A}}</p>
+    </div>
+    <div class="col-md-4">
+      <h3>{{FAQ_2_Q}}</h3>
+      <p>{{FAQ_2_A}}</p>
+    </div>
+    <div class="col-md-4">
+      <h3>{{FAQ_3_Q}}</h3>
+      <p>{{FAQ_3_A}}</p>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="row">
+    <div class="col-md-12">
+      <h2>{{SECTION_12_TITLE}}</h2>
+      <p>{{SECTION_12_P}}</p>
+      <p>{{FINAL_CTA}}</p>
+    </div>
+  </div>
+</div>
+HTML
+                ],
+            ],
+        ];
+
+        return [$tpl, 'PLAIN_HTML_INLINE'];
     }
+
+    // ✅ Lo demás queda EXACTAMENTE igual a tu lógica actual
+    $templateRel = str_replace(['https:', 'http:'], '', $templateRel);
+    if (preg_match('~^https?://~i', $templateRel)) {
+        $u = parse_url($templateRel);
+        $templateRel = $u['path'] ?? $templateRel;
+    }
+
+    $templateRel = preg_replace('~^/?storage/app/~i', '', $templateRel);
+    $templateRel = ltrim(str_replace('\\', '/', $templateRel), '/');
+
+    if (str_contains($templateRel, '..')) throw new \RuntimeException('NO_RETRY: Template path inválido (no se permite "..")');
+
+    $templatePath = storage_path('app/' . $templateRel);
+    if (!is_file($templatePath)) throw new \RuntimeException("NO_RETRY: No existe el template en disco: {$templatePath}");
+
+    $raw = (string) file_get_contents($templatePath);
+    $tpl = json_decode($raw, true);
+
+    if (!is_array($tpl) || !isset($tpl['content']) || !is_array($tpl['content'])) {
+        throw new \RuntimeException('NO_RETRY: Template Elementor inválido: debe contener "content" (array).');
+    }
+
+    return [$tpl, $templatePath];
+}
 
     // ========================= TOKENS META =========================
     private function collectTokensMeta(array $tpl): array
