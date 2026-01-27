@@ -1264,7 +1264,7 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     $it  = Dominios_Contenido_DetallesModel::findOrFail($detalle);
 
     $request->validate([
-        'schedule_at' => ['required', 'string'], // ISO UTC desde el hidden (ej: ...Z)
+        'schedule_at' => ['required', 'string'],
     ]);
 
     $it->estatus = 'en_proceso';
@@ -1277,7 +1277,6 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
             throw new \RuntimeException('WP_WEBHOOK_SECRET no configurado en .env');
         }
 
-        // schedule_at viene en ISO UTC (Z). Parse robusto y normalización.
         $scheduleAtRaw = (string) $request->input('schedule_at');
 
         try {
@@ -1286,13 +1285,13 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
             throw new \RuntimeException('Fecha inválida en schedule_at: ' . $scheduleAtRaw);
         }
 
-        $scheduleAtUtcIso = $dtUtc->toIso8601String(); // 2025-12-19T16:30:00+00:00
+        // ✅ WordPress SAFE (GMT): "Y-m-d H:i:s"
+        $scheduleAtUtcWp = $dtUtc->format('Y-m-d H:i:s');
 
-        $wpBase     = rtrim((string) $dom->url, '/');
-        $urlRest    = $wpBase . '/wp-json/lws/v1/upsert';
-        $urlFallback= $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
+        $wpBase      = rtrim((string) $dom->url, '/');
+        $urlRest     = $wpBase . '/wp-json/lws/v1/upsert';
+        $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
 
-        // ✅ Robustez: normaliza el tipo
         $tipoNorm = strtolower(trim((string) $it->tipo));
         $type = ($tipoNorm === 'page') ? 'page' : 'post';
 
@@ -1300,20 +1299,16 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
             throw new \RuntimeException('contenido_html está vacío (no hay nada que programar).');
         }
 
-        // ✅ Si NO hay plantilla seleccionada en el dominio => NO usar Elementor
         $templatePath = trim((string) ($dom->elementor_template_path ?? ''));
         $useElementor = ($templatePath !== '');
 
-        // ✅ Canvas solo aplica a pages
         $canvas = ($type === 'page') ? 'elementor_canvas' : '';
 
-        // ✅ Content: si no usamos Elementor, aseguramos enviar HTML (no JSON)
         $contentToSend = (string) $it->contenido_html;
 
+        // Si NO usamos Elementor, asegúrate de enviar HTML (no JSON)
         if (!$useElementor) {
             $contentToSendTrim = ltrim($contentToSend);
-
-            // Si parece JSON, intentamos extraer un bloque HTML usable desde editor/content/text
             $looksLikeJson = ($contentToSendTrim !== '' && in_array($contentToSendTrim[0], ['{', '['], true));
 
             if ($looksLikeJson) {
@@ -1339,33 +1334,31 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
                     if (is_string($candidate) && trim($candidate) !== '') {
                         $contentToSend = $candidate;
                     } else {
-                        // fallback final: por si no encontramos nada dentro del JSON
                         $contentToSend = '<div>' . e($it->title ?: ($it->keyword ?: '')) . '</div>';
                     }
                 }
             }
 
-            // Si no contiene tags, lo envolvemos simple para que WP no quede vacío
             if (!str_contains($contentToSend, '<')) {
                 $contentToSend = '<div>' . e($contentToSend) . '</div>';
             }
         }
 
         $payload = [
-            'type'        => $type,
-            'wp_id'       => $it->wp_id ?: null,
-            'title'       => $it->title ?: ($it->keyword ?: 'Sin título'),
-            'content'     => $contentToSend,
+            'type'    => $type,
+            'wp_id'   => $it->wp_id ?: null,
+            'title'   => $it->title ?: ($it->keyword ?: 'Sin título'),
+            'content' => $contentToSend,
 
-            // ✅ clave: builder según si hay plantilla o no
-            'builder'     => $useElementor ? 'elementor' : 'html',
+            'builder' => $useElementor ? 'elementor' : 'html',
 
-            // ✅ Solo setear template/canvas cuando sea Elementor
             'wp_page_template' => $useElementor ? $canvas : '',
             'template'         => $useElementor ? $canvas : '',
 
             'status'      => 'future',
-            'schedule_at' => $scheduleAtUtcIso,
+
+            // ✅ manda fecha en formato WP-safe
+            'schedule_at' => $scheduleAtUtcWp,
         ];
 
         $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -1384,7 +1377,6 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
 
         $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlRest, ['body' => $body]);
 
-        // fallback si wp-json está bloqueado
         if (in_array($resp->status(), [404, 405], true)) {
             $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlFallback, ['body' => $body]);
         }
@@ -1399,22 +1391,17 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
             return back()->with('error', 'No se pudo programar: ' . $msg);
         }
 
-        // Guardar ID y link siempre que existan
         $it->wp_id   = (int) ($json['wp_id'] ?? 0) ?: $it->wp_id;
         $it->wp_link = (string) ($json['link'] ?? '');
 
-        // Guardar estatus según WP + scheduled_at
         $wpStatus = (string) ($json['status'] ?? '');
 
         if ($wpStatus === 'future') {
             $it->estatus = 'programado';
 
-            // ✅ ideal: usar fecha exacta que WP guardó (si plugin la devuelve)
             if (!empty($json['scheduled_gmt'])) {
-                $it->scheduled_at = Carbon::parse($json['scheduled_gmt'], 'UTC')
-                    ->setTimezone(config('app.timezone'));
+                $it->scheduled_at = Carbon::parse($json['scheduled_gmt'], 'UTC')->setTimezone(config('app.timezone'));
             } else {
-                // fallback: usa lo que tú mandaste
                 $it->scheduled_at = $dtUtc->copy()->setTimezone(config('app.timezone'));
             }
         } elseif ($wpStatus === 'publish') {
