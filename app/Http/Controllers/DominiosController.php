@@ -1286,26 +1286,94 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
             throw new \RuntimeException('Fecha inválida en schedule_at: ' . $scheduleAtRaw);
         }
 
-        // ISO limpio para enviar al plugin
         $scheduleAtUtcIso = $dtUtc->toIso8601String(); // 2025-12-19T16:30:00+00:00
 
-        $wpBase = rtrim((string) $dom->url, '/');
-        $urlRest = $wpBase . '/wp-json/lws/v1/upsert';
-        $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
+        $wpBase     = rtrim((string) $dom->url, '/');
+        $urlRest    = $wpBase . '/wp-json/lws/v1/upsert';
+        $urlFallback= $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
 
-        $type = ($it->tipo === 'page') ? 'page' : 'post';
+        // ✅ Robustez: normaliza el tipo
+        $tipoNorm = strtolower(trim((string) $it->tipo));
+        $type = ($tipoNorm === 'page') ? 'page' : 'post';
+
+        if (empty($it->contenido_html)) {
+            throw new \RuntimeException('contenido_html está vacío (no hay nada que programar).');
+        }
+
+        // ✅ Si NO hay plantilla seleccionada en el dominio => NO usar Elementor
+        $templatePath = trim((string) ($dom->elementor_template_path ?? ''));
+        $useElementor = ($templatePath !== '');
+
+        // ✅ Canvas solo aplica a pages
+        $canvas = ($type === 'page') ? 'elementor_canvas' : '';
+
+        // ✅ Content: si no usamos Elementor, aseguramos enviar HTML (no JSON)
+        $contentToSend = (string) $it->contenido_html;
+
+        if (!$useElementor) {
+            $contentToSendTrim = ltrim($contentToSend);
+
+            // Si parece JSON, intentamos extraer un bloque HTML usable desde editor/content/text
+            $looksLikeJson = ($contentToSendTrim !== '' && in_array($contentToSendTrim[0], ['{', '['], true));
+
+            if ($looksLikeJson) {
+                $decoded = json_decode($contentToSend, true);
+                if (is_array($decoded)) {
+                    $candidate = null;
+
+                    $walk = function ($node) use (&$walk, &$candidate) {
+                        if ($candidate) return;
+                        if (is_array($node)) {
+                            foreach ($node as $k => $v) {
+                                if (is_string($k) && in_array($k, ['editor', 'content', 'text'], true) && is_string($v) && str_contains($v, '<')) {
+                                    $candidate = $v;
+                                    return;
+                                }
+                                $walk($v);
+                            }
+                        }
+                    };
+
+                    $walk($decoded);
+
+                    if (is_string($candidate) && trim($candidate) !== '') {
+                        $contentToSend = $candidate;
+                    } else {
+                        // fallback final: por si no encontramos nada dentro del JSON
+                        $contentToSend = '<div>' . e($it->title ?: ($it->keyword ?: '')) . '</div>';
+                    }
+                }
+            }
+
+            // Si no contiene tags, lo envolvemos simple para que WP no quede vacío
+            if (!str_contains($contentToSend, '<')) {
+                $contentToSend = '<div>' . e($contentToSend) . '</div>';
+            }
+        }
 
         $payload = [
             'type'        => $type,
             'wp_id'       => $it->wp_id ?: null,
             'title'       => $it->title ?: ($it->keyword ?: 'Sin título'),
-            'content'     => $it->contenido_html ?: '',
+            'content'     => $contentToSend,
+
+            // ✅ clave: builder según si hay plantilla o no
+            'builder'     => $useElementor ? 'elementor' : 'html',
+
+            // ✅ Solo setear template/canvas cuando sea Elementor
+            'wp_page_template' => $useElementor ? $canvas : '',
+            'template'         => $useElementor ? $canvas : '',
+
             'status'      => 'future',
             'schedule_at' => $scheduleAtUtcIso,
         ];
 
-        $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
-        $ts = time();
+        $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($body === false) {
+            throw new \RuntimeException('No se pudo serializar payload JSON');
+        }
+
+        $ts  = time();
         $sig = hash_hmac('sha256', $ts . '.' . $body, $secret);
 
         $headers = [
