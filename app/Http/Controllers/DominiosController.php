@@ -1131,30 +1131,6 @@ public function publicar($dominio, int $detalle): RedirectResponse
         $urlRest     = $wpBase . '/wp-json/lws/v1/upsert';
         $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
 
-        // ✅ Robustez: normaliza el tipo (evita que "Page"/"PAGE"/" pagina " se vaya a post)
-        $tipoNorm = strtolower(trim((string) $it->tipo));
-        $type = ($tipoNorm === 'page') ? 'page' : 'post';
-
-        if (empty(public function publicar($dominio, int $detalle): RedirectResponse
-{
-    $dom = DominiosModel::findOrFail($dominio);
-    $it  = Dominios_Contenido_DetallesModel::findOrFail($detalle);
-
-    $it->estatus = 'en_proceso';
-    $it->error = null;
-    $it->save();
-
-    try {
-        $secret = (string) env('WP_WEBHOOK_SECRET'); // DEBE ser el mismo que el plugin
-        if ($secret === '') {
-            throw new \RuntimeException('WP_WEBHOOK_SECRET no configurado en .env');
-        }
-
-        $wpBase = rtrim((string)$dom->url, '/');
-
-        $urlRest     = $wpBase . '/wp-json/lws/v1/upsert';
-        $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
-
         // ✅ Robustez: normaliza el tipo
         $tipoNorm = strtolower(trim((string) $it->tipo));
         $type = ($tipoNorm === 'page') ? 'page' : 'post';
@@ -1278,6 +1254,8 @@ public function publicar($dominio, int $detalle): RedirectResponse
         return back()->with('error', 'Error publicando en WordPress: ' . $e->getMessage());
     }
 }
+
+
 
 
 public function programar(Request $request, $dominio, int $detalle): RedirectResponse
