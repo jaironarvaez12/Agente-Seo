@@ -83,6 +83,21 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="form-switch switch-primary d-flex align-items-center gap-3 mb-12">
+                                <input
+                                    class="form-check-input"
+                                    type="checkbox"
+                                    role="switch"
+                                    id="solo_html"
+                                    name="solo_html"
+                                    value="1"
+                                    {{ old('solo_html', is_null($dominio->elementor_template_path)) ? 'checked' : '' }}
+                                >
+                                <label class="form-check-label line-height-1 fw-medium text-secondary-light" for="solo_html">
+                                    Solo texto HTML (no usar plantilla Elementor)
+                                </label>
+                            </div>
+
                             <!-- Upload Image End -->
                                 {{-- <div class="mb-20">
                                     <label for="usuario" class="form-label fw-semibold text-primary-light text-sm mb-8">
@@ -308,5 +323,41 @@
         type: 'image',
         gallery: { enabled: true }
     });
+</script>
+<script>
+  const soloHtml = document.getElementById('solo_html');
+  const inputPath = document.getElementById('elementor_template_path');
+
+  function applySoloHtmlState() {
+    const checked = !!soloHtml?.checked;
+
+    if (checked) {
+      // Limpia el valor (backend lo convierte a NULL)
+      if (inputPath) inputPath.value = '';
+
+      // Quita selección visual
+      document.querySelectorAll('.tpl-card').forEach(c => c.classList.remove('tpl-selected'));
+
+      // Deshabilita botones seleccionar
+      document.querySelectorAll('.tpl-select-btn').forEach(b => b.disabled = true);
+    } else {
+      // Habilita solo los que tengan path válido
+      document.querySelectorAll('.tpl-select-btn').forEach(b => {
+        const p = b.dataset.path || '';
+        b.disabled = (p === '');
+      });
+    }
+  }
+
+  soloHtml?.addEventListener('change', applySoloHtmlState);
+  applySoloHtmlState();
+
+  // Si selecciona plantilla, apaga el switch automáticamente (recomendado)
+  document.querySelectorAll('.tpl-select-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (soloHtml && soloHtml.checked) soloHtml.checked = false;
+      applySoloHtmlState();
+    });
+  });
 </script>
 @endsection

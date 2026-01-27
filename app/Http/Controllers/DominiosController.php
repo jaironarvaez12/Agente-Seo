@@ -358,10 +358,15 @@ class DominiosController extends Controller
                 'usuario' => ['nullable','string','max:255'],
                 'password' => ['nullable','string','max:255'],
                 'elementor_template_path' => ['nullable','string','max:255'],
+                  'solo_html' => ['nullable','boolean'], // ✅ nuevo
             ]);
+           $soloHtml = (bool) $request->input('solo_html', false);
+            $path = $soloHtml ? null : $request->input('elementor_template_path');
+            $path = ($path === '') ? null : $path;
+
 
             $dominios->fill([
-                'usuario' => $request->input('usuario'),
+               
                 'elementor_template_path' => $request->input('elementor_template_path'), // 👈 NUEVO
             ]);
 
@@ -370,9 +375,7 @@ class DominiosController extends Controller
                 $dominios->imagen = $destino . $NombreCarpeta . '/' . $NombreImagen;
             }
 
-            if ($request->filled('password')) {
-                $dominios->password = Crypt::encryptString($request->input('password'));
-            }
+           
 
             $dominios->save();
 
