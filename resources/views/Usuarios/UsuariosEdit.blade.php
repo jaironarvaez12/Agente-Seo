@@ -83,7 +83,9 @@
                                         <input type="text" class="form-control radius-8 @error('email') is-invalid @enderror"
                                             name="email" value=" {{ old('email', $usuario->email ?? '') }}"placeholder="Ingrese su correo">
                                     </div>
-                                  
+                                  @if($usuario->id_usuario_padre==null)
+                                    
+                                 
                                     <div class="mb-20">
                                         <label class="form-label fw-semibold text-primary-light text-sm mb-8">
                                             Licencia (dejar vacío si no se cambia)
@@ -120,7 +122,7 @@
                                             </select>
                                         
                                     </div>
-                                    
+                                     @endif
                                       <div class="row">
                                         <div class="col-md-8">
                                             <label for="depart" class="form-label fw-semibold text-primary-light text-sm mb-8">Dominios</label>

@@ -33,6 +33,15 @@
                             <iconify-icon icon="ic:baseline-plus" class="icon text-xl line-height-1"></iconify-icon>
                             Nuevo
                           </a>
+                          
+                    </div>
+                    <div style="width: auto;">
+                          <a href="{{ route('usuarios.dependientes.crear') }}"
+                            class="btn btn-primary d-flex align-items-center gap-2">
+                            <iconify-icon icon="ic:baseline-plus" class="icon text-lg"></iconify-icon>
+                            Crear Dependiente
+                          </a>
+                          
                     </div>
                 </div>
             </div>

@@ -47,7 +47,9 @@
   color:#fff !important;
 }
 
-
+/* Solo submenú anidado */
+.sidebar-submenu li.dropdown > ul.sidebar-submenu { display: none; }
+.sidebar-submenu li.dropdown.open > ul.sidebar-submenu { display: block; }
 </style>
 <aside class="sidebar">
   <button type="button" class="sidebar-close-btn">
@@ -179,22 +181,38 @@
         </a>
       </li> --}}
      
-       <li class="dropdown">
-        <a href="javascript:void(0)">
+      <li class="dropdown">
+        <a href="#" class="submenu-toggle">
           <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
-          <span>Dominios</span>
+          <span>Seos</span>
         </a>
-        <ul class="sidebar-submenu">
-          <li>
-            <a href="{{ route('dominios.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Lista de Dominios</a>
-          </li>
-          <li>
-            <a href="{{ route('dominiosidentidad') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Identidad de Dominios</a>
-          </li>
 
+        <ul class="sidebar-submenu">
+          <li class="dropdown">
+            <a href="#" class="submenu-toggle">
+              <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
+              <span>Dominios</span>
+            </a>
+
+            <ul class="sidebar-submenu">
+              <li>
+                <a href="{{ route('dominios.index') }}">
+                  <i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>
+                  Lista de Dominios
+                </a>
+              </li>
+              <li>
+                <a href="{{ route('dominiosidentidad') }}">
+                  <i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>
+                  Identidad de Dominios
+                </a>
+              </li>
+            </ul>
+          </li>
         </ul>
       </li>
 
+       
  
 
   
@@ -203,3 +221,99 @@
     </ul>
   </div>
 </aside>
+<script>
+(() => {
+  const isNestedDropdown = (li) =>
+    li?.matches("li.dropdown") && li.parentElement?.classList.contains("sidebar-submenu");
+
+  const getSubmenu = (li) => li.querySelector(":scope > ul.sidebar-submenu");
+
+  const setVisible = (ul, visible) => {
+    if (!ul) return;
+    ul.hidden = !visible;
+    ul.style.display = visible ? "block" : "none";
+  };
+
+  // Sincroniza: si el LI tiene .open => el UL se muestra, si no => se oculta
+  const syncNestedDropdown = (li) => {
+    if (!isNestedDropdown(li)) return;
+    const ul = getSubmenu(li);
+    if (!ul) return;
+    const open = li.classList.contains("open");
+    setVisible(ul, open);
+  };
+
+  const syncAllNested = () => {
+    document.querySelectorAll("ul.sidebar-submenu > li.dropdown").forEach(syncNestedDropdown);
+  };
+
+  // Estado inicial
+  document.addEventListener("DOMContentLoaded", syncAllNested);
+
+  // Click handler (solo nested dropdowns como "Dominios")
+  document.addEventListener(
+    "click",
+    (e) => {
+      const toggle = e.target.closest("a.submenu-toggle");
+      if (!toggle) return;
+
+      const li = toggle.closest("li.dropdown");
+      if (!isNestedDropdown(li)) return;
+
+      const submenu = getSubmenu(li);
+      if (!submenu) return;
+
+      // Evita que el template lo cierre o lo deje en estado raro
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+
+      const parentUl = li.parentElement;
+
+      // Cierra hermanos del mismo nivel
+      Array.from(parentUl.children).forEach((sib) => {
+        if (sib !== li && sib.classList?.contains("dropdown")) {
+          sib.classList.remove("open");
+          setVisible(getSubmenu(sib), false);
+        }
+      });
+
+      // Toggle actual
+      const willOpen = !li.classList.contains("open");
+      li.classList.toggle("open", willOpen);
+      setVisible(submenu, willOpen);
+
+      // Mantén ancestros abiertos (Seos)
+      let parent = li.parentElement?.closest("li.dropdown");
+      while (parent) {
+        parent.classList.add("open");
+        parent = parent.parentElement?.closest("li.dropdown");
+      }
+
+      // 🔑 Re-sync por si el template vuelve a tocar estilos/clases
+      queueMicrotask(syncAllNested);
+      setTimeout(syncAllNested, 0);
+    },
+    true
+  );
+
+  // Observa cambios de clase en dropdowns anidados para mantener todo sincronizado
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type === "attributes" && m.attributeName === "class") {
+        syncNestedDropdown(m.target);
+      }
+    }
+  });
+
+  const observeAll = () => {
+    document.querySelectorAll("ul.sidebar-submenu > li.dropdown").forEach((li) => {
+      observer.observe(li, { attributes: true, attributeFilter: ["class"] });
+      // Asegura estado visible correcto
+      syncNestedDropdown(li);
+    });
+  };
+
+  document.addEventListener("DOMContentLoaded", observeAll);
+})();
+</script>

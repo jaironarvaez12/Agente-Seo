@@ -59,4 +59,40 @@ public function getLicenseKeyPlain(): ?string
     if (!$this->license_key) return null;
     return Crypt::decryptString($this->license_key);
 }
+
+
+
+    public function usuarioPadre()
+    {
+        return $this->belongsTo(User::class, 'id_usuario_padre');
+    }
+
+    public function usuariosDependientes()
+    {
+        return $this->hasMany(User::class, 'id_usuario_padre');
+    }
+
+    /**
+     * Devuelve el usuario TITULAR (dueño) de la licencia.
+     * Si el usuario es dependiente -> retorna el padre.
+     * Si el usuario es titular -> retorna él mismo.
+     */
+    public function titularLicencia()
+    {
+        return $this->id_usuario_padre ? $this->usuarioPadre()->first() : $this;
+    }
+
+    /**
+     * Devuelve la licencia efectiva (la del titular).
+     */
+    public function obtenerLicenciaKeyEfectiva()
+    {
+        return $this->titularLicencia()->license_key;
+    }
+
+    public function obtenerLicenciaEmailEfectiva()
+    {
+        return $this->titularLicencia()->license_email;
+    }
+
 }

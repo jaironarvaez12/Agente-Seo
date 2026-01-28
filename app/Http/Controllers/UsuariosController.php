@@ -134,75 +134,130 @@ class UsuariosController extends Controller
 
     public function update(UsuariosUpdateRequest $request, $id)
     {
-       //dd($request);
-        try
-        { 
-            $usuario = User::find($id);
-             $FechaActual = Carbon::now()->format('Y-m-d H:i:s'); // Obtiene La fecha Actual
+        try {
+            $actor = auth()->user();
 
+            $usuario = User::findOrFail($id);
+            $FechaActual = Carbon::now()->format('Y-m-d H:i:s');
 
+            // -----------------------------
+            // 1) SEGURIDAD: ownership
+            // -----------------------------
+            $idTitularActor = $actor->id_usuario_padre ?? $actor->id;
+
+            $permitido =
+                $actor->hasRole('administrador')
+                || $usuario->id === $idTitularActor
+                || $usuario->id_usuario_padre === $idTitularActor;
+
+            abort_if(!$permitido, 403, 'No tienes permiso para editar este usuario.');
+
+            // -----------------------------
+            // 2) Datos básicos
+            // -----------------------------
             $usuario->fill([
-                'name' => strtoupper($request['name']),
-                'email' => $request['email'],
-          
-            
-              
-             ]);
-            // Guardar license_email (si viene)
-            $usuario->license_email = $request->input('license_email');
+                'name'  => strtoupper($request->input('name')),
+                'email' => $request->input('email'),
+            ]);
 
-            // Guardar license_key SOLO si el usuario pegó una nueva
-            if ($request->filled('license_key')) {
-                $usuario->setLicenseKeyPlain($request->input('license_key'));
+            // -----------------------------
+            // 3) Licencia: SOLO si el usuario editado es TITULAR (no dependiente)
+            // -----------------------------
+            $esDependiente = !is_null($usuario->id_usuario_padre);
+
+            if (!$esDependiente) {
+                // Guardar license_email (si viene)
+                $usuario->license_email = $request->input('license_email');
+
+                // Guardar license_key SOLO si pegó una nueva
+                if ($request->filled('license_key')) {
+                    $usuario->setLicenseKeyPlain($request->input('license_key'));
+                }
+            } else {
+                // Si quieres ser estricto: impedir que te manden datos de licencia para dependientes
+                if ($request->filled('license_key') || $request->filled('license_email')) {
+                    abort(403, 'Un usuario dependiente no puede modificar la licencia.');
+                }
             }
-            $usuario->syncRoles($request->input('roles'));  //Sinronizacion de rol
-            //  $usuario->syncPermissions($request->input('permisos', [])); // agregar los permisos 
 
-            if (!empty($request->input('password'))) //enviar vacio la contraseña y no la actualice
-            {
+            // -----------------------------
+            // 4) Rol
+            // -----------------------------
+           if ($request->filled('roles') && $request->input('roles') !== '0') {
+                $usuario->syncRoles($request->input('roles'));
+            }
+
+            // -----------------------------
+            // 5) Contraseña (solo si viene)
+            // -----------------------------
+            if ($request->filled('password')) {
                 $usuario->password = Hash::make($request->input('password'));
             }
 
-    
-            $DatosDominios = json_decode($request['datos_tiendas']); //arreglo de datos adicionales
-    
-           
-             DB::transaction(function () use ($DatosDominios , $usuario,$FechaActual)
-             {
-                 $usuario->save(); //actualizar usuario
+            // -----------------------------
+            // 6) Dominios (tabla pivote)
+            //    Regla: el dependiente SOLO puede recibir dominios del titular.
+            // -----------------------------
+            $DatosDominios = $request->filled('datos_tiendas')
+                ? json_decode($request->input('datos_tiendas'))
+                : null;
 
-              
-                 if ($DatosDominios  != NULL)  //verifica si el arreglo no esta vacio
-                 {
-                  
+            // Titular real del usuario que estamos editando:
+            // - si es dependiente, su titular es id_usuario_padre
+            // - si es titular, es él mismo
+            $idTitularDelEditado = $usuario->id_usuario_padre ?? $usuario->id;
+
+            DB::transaction(function () use ($DatosDominios, $usuario, $FechaActual, $idTitularDelEditado) {
+
+                $usuario->save();
+
+                // Si mandan dominios (aunque sea lista vacía), sincronizamos
+                if ($DatosDominios !== null) {
+
+                    // Limpia los dominios actuales del usuario editado
                     Dominios_UsuariosModel::where('id_usuario', $usuario->id)->delete();
 
-                
-                    foreach ($DatosDominios  as $dominio) {
-                        $IdDominioUsuario=  Dominios_UsuariosModel::max('id_dominio_usuario') + 1;
-                        Dominios_UsuariosModel::create([
+                    // Para evitar duplicados en el JSON
+                    $idsUnicos = collect($DatosDominios)
+                        ->pluck('id_dominio')
+                        ->unique()
+                        ->values();
 
-                            'id_dominio_usuario' =>  $IdDominioUsuario,
-                            'id_dominio' => $dominio->id_dominio,
-                            'id_usuario'=> $usuario->id,
-                            'creado_por'=> $usuario->id,
-                            'fecha_creacion' => $FechaActual,
+                    foreach ($idsUnicos as $idDominio) {
+
+                        // Validar que el dominio pertenezca al titular (según tu regla actual creado_por)
+                        $dominioValido = DominiosModel::where('id_dominio', $idDominio)
+                            ->where('creado_por', $idTitularDelEditado)
+                            ->exists();
+
+                        abort_if(!$dominioValido, 403, 'Intentaste asignar un dominio que no pertenece al titular.');
+
+                        Dominios_UsuariosModel::create([
+                            // OJO: esto es mejor hacerlo AUTO INCREMENT en BD.
+                            // Si lo dejas así, puede fallar con concurrencia.
+                            'id_dominio_usuario' => Dominios_UsuariosModel::max('id_dominio_usuario') + 1,
+                            'id_dominio'         => $idDominio,
+                            'id_usuario'         => $usuario->id,
+
+                            // El creador real debería ser quien está haciendo la acción (titular/admin),
+                            // pero si no quieres pasar $actor aquí, deja el titular.
+                            'creado_por'         => $idTitularDelEditado,
+                            'fecha_creacion'     => $FechaActual,
                         ]);
                     }
-                } 
-                
-                
+                }
             });
-        
+
+        } catch (Exception $ex) {
+            return redirect()->back()
+                ->withError('Ha ocurrido un error al actualizar el usuario: ' . $ex->getMessage())
+                ->withInput();
         }
-        catch(Exception $ex)
-            {
-                return redirect()->back()->withError('Ha Ocurrido Un Error Al Actualizar El Usuario '.$ex->getMessage())->withInput();
-            }
 
-        return redirect()->route('usuarios.edit', $id)->withSuccess('El Usuario Se Ha Actualizado Exitosamente');
-
+        return redirect()->route('usuarios.edit', $id)
+            ->withSuccess('El Usuario se ha actualizado exitosamente');
     }
+
 
     /**
      * Remove the specified resource from storage.
@@ -272,5 +327,55 @@ class UsuariosController extends Controller
  
          return back()->with('');
     }
+    public function crearDependiente()
+    {
+        $titular = auth()->user();
+
+        // Permisos disponibles para asignar (solo los que el titular tiene)
+        // Los mandamos como colección con ->name para que la vista sea igual a Roles
+        $permisos = $titular->getAllPermissions()->sortBy('name');
+
+        return view('Usuarios.UsuarioDependienteCrear', compact('permisos'));
+    }
+
+    public function guardarDependiente(Request $request)
+{
+    $titular = auth()->user();
+
+    $request->validate([
+        'nombre' => ['required','string','max:255'],
+        'correo' => ['required','email','max:255','unique:users,email'],
+        'password' => ['required'],
+        'permisos' => ['array'],
+        'permisos.*' => ['string'],
+    ]);
+
+    // Validar: solo puede asignar permisos que el titular ya tiene
+    $permisosSolicitados = collect($request->input('permisos', []));
+    $permisosDelTitular  = $titular->getAllPermissions()->pluck('name');
+
+    abort_if($permisosSolicitados->diff($permisosDelTitular)->isNotEmpty(), 403,
+        'No puedes asignar permisos que no tienes.'
+    );
+
+    $dependiente = new User();
+    $dependiente->name = strtoupper($request->input('nombre'));
+    $dependiente->email = $request->input('correo');
+    $dependiente->password = Hash::make($request->input('password'));
+
+    $dependiente->id_usuario_padre = $titular->id;
+
+    // Hereda licencia (no guardar en hijo)
+    $dependiente->license_key = null;
+    $dependiente->license_email = null;
+
+    $dependiente->save();
+
+    // Asignar permisos por NOMBRE (Spatie acepta array de strings)
+    $dependiente->syncPermissions($permisosSolicitados->toArray());
+
+    return redirect()->route('usuarios.edit', $dependiente->id)
+        ->withSuccess('Usuario dependiente creado correctamente.');
+}
    
 }

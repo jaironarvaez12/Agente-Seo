@@ -211,6 +211,18 @@ Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
             ->name('dominios.licencia.desactivar');
     });
 
+
+
+
+
+    // Formulario para crear usuario dependiente
+    Route::get('/usuarios/dependientes/crear', [App\Http\Controllers\UsuariosController::class, 'crearDependiente'])
+        ->name('usuarios.dependientes.crear');
+
+    // Guardar usuario dependiente
+    Route::post('/usuarios/dependientes/guardar', [App\Http\Controllers\UsuariosController::class, 'guardarDependiente'])
+        ->name('usuarios.dependientes.guardar');
+
     });
 
 

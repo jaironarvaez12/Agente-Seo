@@ -25,6 +25,7 @@ use Intervention\Image\Laravel\Facades\Image;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
 use App\Services\LicenseService;
+use App\Models\User;
 class DominiosController extends Controller
 {
     /**
@@ -89,53 +90,69 @@ class DominiosController extends Controller
         return $count;
     }
     public function index()
-{
-    $userId = Auth::id();
+    {
+        $usuario = auth()->user();
 
-    if (Auth::user()->roles[0]->name == 'administrador') {
-        $dominios = DominiosModel::all();
-    } else {
+        // Titular real
+        $idTitular = $usuario->id_usuario_padre ?? $usuario->id;
+        $titular = $usuario->id_usuario_padre ? User::find($idTitular) : $usuario;
 
-        // IDs de dominios asignados al usuario (tabla pivote)
-        $idsAsignados = Dominios_UsuariosModel::where('id_usuario', $userId)
-            ->pluck('id_dominio');
+        // ---------------- DOMINIOS ----------------
+        if ($usuario->hasRole('administrador')) {
+            $dominios = DominiosModel::all();
+        } else {
 
-        // Dominios que (a) están asignados al usuario o (b) fueron creados por él
-        $dominios = DominiosModel::whereIn('id_dominio', $idsAsignados)
-            ->orWhere('creado_por', $userId)
-            ->get();
+            // Dominios asignados AL USUARIO LOGUEADO (si es dependiente, solo los suyos)
+            $idsAsignados = Dominios_UsuariosModel::where('id_usuario', $usuario->id)
+                ->pluck('id_dominio');
+
+            $consulta = DominiosModel::whereIn('id_dominio', $idsAsignados);
+
+            // Si es titular, también ve los creados por él
+            if (is_null($usuario->id_usuario_padre)) {
+                $consulta->orWhere('creado_por', $idTitular);
+            }
+
+            $dominios = $consulta->get();
+        }
+
+        // ---------------- LICENCIA ----------------
+        $plan = 'pro';
+        $maximo = (int) config("licenses.max_by_plan.$plan", 0);
+
+        $usados = 0;
+        $restantes = 0;
+
+        if ($titular && $titular->license_key) {
+            $licenciaPlano = $titular->getLicenseKeyPlain();
+
+            // Importante: contar por el titular, NO por el dependiente
+            $usados = (int) LicenciaDominiosActivacionModel::where('user_id', $titular->id)
+                ->where('license_key', sha1($licenciaPlano))
+                ->where('estatus', 'activo')
+                ->count();
+
+            $restantes = max(0, $maximo - $usados);
+        }
+
+        return view('Dominios.Dominio', compact('dominios', 'plan', 'maximo', 'usados', 'restantes'));
     }
-
-    // --- lo tuyo de licencias igual ---
-    $user = auth()->user();
-
-    $plan = 'pro';
-    $max = (int) config("licenses.max_by_plan.$plan", 0);
-
-    $used = 0;
-    $remaining = 0;
-
-    if ($user && $user->license_key) {
-        $licensePlain = $user->getLicenseKeyPlain();
-
-        $used = (int) LicenciaDominiosActivacionModel::where('user_id', $user->id)
-            ->where('license_key', sha1($licensePlain))
-            ->where('estatus', 'activo')
-            ->count();
-
-        $remaining = max(0, $max - $used);
-    }
-
-    return view('Dominios.Dominio', compact('dominios', 'plan', 'max', 'used', 'remaining'));
-}
-
 
     /**
      * Show the form for creating a new resource.
      */
-   public function create()
+    public function create()
     {
-        $user = auth()->user();
+        $usuario = auth()->user();
+        if (!$usuario) {
+            return redirect()->back()->withError('Debes iniciar sesión.');
+        }
+
+        // Titular real (si es dependiente, es el padre)
+        $titular = $usuario->titularLicencia();
+        if (!$titular) {
+            return redirect()->back()->withError('No se encontró el titular de la licencia.');
+        }
 
         $plan = 'pro'; // por ahora fijo. Luego lo guardamos en users (license_plan)
         $max = (int) config("licenses.max_by_plan.$plan", 0);
@@ -143,15 +160,19 @@ class DominiosController extends Controller
         $used = 0;
         $remaining = 0;
 
-        if ($user && $user->license_key) {
-            $licensePlain = $user->getLicenseKeyPlain();
+        // Licencia efectiva (del titular)
+        if ($titular->license_key) {
+            $licensePlain = $titular->getLicenseKeyPlain();
 
-            $used = (int) LicenciaDominiosActivacionModel::where('user_id', $user->id)
+            $used = (int) LicenciaDominiosActivacionModel::where('user_id', $titular->id)
                 ->where('license_key', sha1($licensePlain))
                 ->where('estatus', 'activo')
                 ->count();
 
             $remaining = max(0, $max - $used);
+        } else {
+            // opcional: si quieres mostrar 0 pero con mensaje en la vista
+            // return redirect()->back()->withError('El titular no tiene licencia registrada.');
         }
 
         return view('Dominios.DominioCreate', compact('plan', 'max', 'used', 'remaining'));
@@ -624,15 +645,23 @@ public function verWp($id, WordpressService $wp)
     $user = auth()->user();
     if (!$user) return back()->withError('Debes iniciar sesión.');
 
-    $licensePlain = $user->getLicenseKeyPlain();
-    if (!$licensePlain) return back()->withError('No tienes licencia registrada.');
+    // ✅ Titular real (si es dependiente, usa el padre)
+    $titular = $user->titularLicencia();
+    if (!$titular) return back()->withError('No se encontró el titular de la licencia.');
+
+    // ✅ Licencia del titular (no del dependiente)
+    $licensePlain = $titular->getLicenseKeyPlain();
+    if (!$licensePlain) return back()->withError('El titular no tiene licencia registrada.');
+
+    // Email para consultar límites/plan (mejor el del titular)
+    $emailLicencia = $titular->license_email ?? $titular->email;
 
     $jobsToDispatch = [];
     $msg = null;
     $ok = false;
 
     try {
-        [$ok, $msg, $jobsToDispatch] = DB::transaction(function () use ($IdDominio, $licenses, $licensePlain, $user) {
+        [$ok, $msg, $jobsToDispatch] = DB::transaction(function () use ($IdDominio, $licenses, $licensePlain, $user, $titular, $emailLicencia) {
 
             // ✅ Lock de dominio para evitar doble click simultáneo
             $dominio = DominiosModel::where('id_dominio', (int)$IdDominio)
@@ -645,8 +674,8 @@ public function verWp($id, WordpressService $wp)
 
             $host = $this->hostFromUrl($dominio->url);
 
-            // ✅ límites API (fresh)
-            $planResp = $licenses->getPlanLimitsAuto($licensePlain, $host, $user->email);
+            // ✅ límites API (fresh) con el titular
+            $planResp = $licenses->getPlanLimitsAuto($licensePlain, $host, $emailLicencia);
 
             $plan   = (string) ($planResp['plan'] ?? 'free');
             $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
@@ -657,7 +686,7 @@ public function verWp($id, WordpressService $wp)
             }
 
             // ✅ rango real de vigencia (validity_start / validity_end)
-           [$desde, $hasta, $w] = $licenses->licenseUsageRange($planResp);
+            [$desde, $hasta, $w] = $licenses->licenseUsageRange($planResp);
 
             if (!$w['is_active']) {
                 $endTxt = $w['end'] ? $w['end']->setTimezone(config('app.timezone'))->format('d/m/Y h:i A') : 'N/D';
@@ -671,7 +700,32 @@ public function verWp($id, WordpressService $wp)
             }
 
             // =========================================================
-            // 1) CUPO POR DOMINIO
+            // 0) PERMISO SOBRE DOMINIO (dependiente: solo asignados)
+            // =========================================================
+
+            $dominiosIdsDelUser = DB::table('dominios_usuarios')
+                ->where('id_usuario', (int) $user->id)   // 👈 dominios asignados al usuario logueado
+                ->pluck('id_dominio')
+                ->map(fn ($v) => (int) $v)
+                ->all();
+
+            // Si el usuario es TITULAR (no dependiente), puede generar en dominios creados por él
+            $esTitular = is_null($user->id_usuario_padre);
+
+            $esCreadorDelDominio = false;
+            if ($esTitular) {
+                $esCreadorDelDominio = DB::table('dominios')
+                    ->where('id_dominio', (int) $IdDominio)
+                    ->where('creado_por', (int) $titular->id)
+                    ->exists();
+            }
+
+            if (!in_array((int) $IdDominio, $dominiosIdsDelUser, true) && !$esCreadorDelDominio) {
+                return [false, 'No tienes permiso para generar contenido en este dominio.', []];
+            }
+
+            // =========================================================
+            // 1) CUPO POR DOMINIO (igual)
             // =========================================================
             $ocupadosDominio = (int) Dominios_Contenido_DetallesModel::where('id_dominio', (int)$IdDominio)
                 ->whereIn('tipo', ['post','page'])
@@ -692,26 +746,22 @@ public function verWp($id, WordpressService $wp)
             $remainingDominio = $maxContent - $ocupadosDominio;
 
             // =========================================================
-            // 2) CUPO GLOBAL = max_activations * max_content
+            // 2) CUPO GLOBAL (compartido por titular)
+            //    = max_activations * max_content
             // =========================================================
+
             $maxGlobal = $maxActiveDomains * $maxContent;
 
-            $dominiosIdsDelUser = DB::table('dominios_usuarios')
-                ->where('id_usuario', (int) $user->id)
+            // ✅ IMPORTANTÍSIMO:
+            // El cupo global debe ser compartido por el titular,
+            // así que calculamos usando los dominios DEL TITULAR.
+            $dominiosIdsDelTitular = DB::table('dominios_usuarios')
+                ->where('id_usuario', (int) $titular->id)
                 ->pluck('id_dominio')
                 ->map(fn ($v) => (int) $v)
                 ->all();
 
-            $esCreadorDelDominio = DB::table('dominios')
-                ->where('id_dominio', (int) $IdDominio)
-                ->where('creado_por', (int) $user->id) // <-- ajusta si tu columna se llama distinto
-                ->exists();
-
-            if (!in_array((int) $IdDominio, $dominiosIdsDelUser, true) && !$esCreadorDelDominio) {
-                return [false, 'No tienes permiso para generar contenido en este dominio.', []];
-            }
-
-            $ocupadosGlobal = (int) Dominios_Contenido_DetallesModel::whereIn('id_dominio', $dominiosIdsDelUser)
+            $ocupadosGlobal = (int) Dominios_Contenido_DetallesModel::whereIn('id_dominio', $dominiosIdsDelTitular)
                 ->whereIn('tipo', ['post','page'])
                 ->where('created_at', '>=', $desde)
                 ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
@@ -1443,21 +1493,30 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     }
     public function IdentidadDominios()
     {
-         $userId = Auth::id();
-        if (Auth::user()->roles[0]->name == 'administrador') {
+        $usuario = auth()->user();
+        $userId = $usuario->id;
+
+        // Admin ve todo (sin roles[0])
+        if ($usuario->hasRole('administrador')) {
             $dominios = DominiosModel::all();
-        } else {
-
-            // IDs de dominios asignados al usuario (tabla pivote)
-            $idsAsignados = Dominios_UsuariosModel::where('id_usuario', $userId)
-                ->pluck('id_dominio');
-
-            // Dominios que (a) están asignados al usuario o (b) fueron creados por él
-            $dominios = DominiosModel::whereIn('id_dominio', $idsAsignados)
-                ->orWhere('creado_por', $userId)
-                ->get();
+            return view('Dominios.DominioIdentidad', compact('dominios'));
         }
-        
+
+        // Si es dependiente, el titular es el padre; si no, es el mismo usuario
+        $idTitular = $usuario->id_usuario_padre ?? $usuario->id;
+
+        // Dominios asignados al usuario logueado (si es dependiente, solo los suyos)
+        $idsAsignados = Dominios_UsuariosModel::where('id_usuario', $userId)
+            ->pluck('id_dominio');
+
+        $consulta = DominiosModel::whereIn('id_dominio', $idsAsignados);
+
+        // Si es titular, también ve los creados por él
+        if (is_null($usuario->id_usuario_padre)) {
+            $consulta->orWhere('creado_por', $idTitular);
+        }
+
+        $dominios = $consulta->get();
 
         return view('Dominios.DominioIdentidad', compact('dominios'));
     }
@@ -1537,13 +1596,21 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     }
 
 
-public function activarLicencia($id, LicenseService $licenses)
+    public function activarLicencia($id, LicenseService $licenses)
 {
-    $user = auth()->user();
-    if (!$user) return back()->withError('Debes iniciar sesión.');
+    $usuario = auth()->user();
+    if (!$usuario) return back()->withError('Debes iniciar sesión.');
 
-    $licensePlain = $user->getLicenseKeyPlain();
-    if (!$licensePlain) return back()->withError('Tu usuario no tiene licencia registrada.');
+    // Titular real (si es dependiente, usa el padre)
+    $titular = $usuario->id_usuario_padre
+        ? User::find($usuario->id_usuario_padre)
+        : $usuario;
+
+    if (!$titular) return back()->withError('No se encontró el usuario titular de la licencia.');
+
+    // Licencia efectiva (del titular)
+    $licensePlain = $titular->getLicenseKeyPlain();
+    if (!$licensePlain) return back()->withError('El titular no tiene licencia registrada.');
 
     $dominio = DominiosModel::where('id_dominio', $id)->first();
     if (!$dominio) return back()->withError('Dominio no encontrado.');
@@ -1551,8 +1618,8 @@ public function activarLicencia($id, LicenseService $licenses)
     $plan = 'pro';
     $max = (int) config("licenses.max_by_plan.$plan", 0);
 
-    // Conteo local (para bloquear UI; servidor igual manda el máximo real)
-    $used = (int) LicenciaDominiosActivacionModel::where('user_id', $user->id)
+    // Conteo local SIEMPRE por el titular (mismo cupo para todos)
+    $used = (int) LicenciaDominiosActivacionModel::where('user_id', $titular->id)
         ->where('license_key', sha1($licensePlain))
         ->where('estatus', 'activo')
         ->count();
@@ -1564,12 +1631,17 @@ public function activarLicencia($id, LicenseService $licenses)
     $host = $this->hostFromUrl($dominio->url);
 
     try {
-        DB::transaction(function () use ($licenses, $user, $licensePlain, $host, $dominio) {
+        DB::transaction(function () use ($licenses, $usuario, $titular, $licensePlain, $host, $dominio) {
+
+            // Email para activación: primero license_email del titular, luego email del titular
+            $emailLicencia = $titular->license_email ?? $titular->email;
+
+            // Importante: registrar con el ID DEL TITULAR (para que el cupo sea compartido)
             $resp = $licenses->activarYRegistrar(
-                $user->id,
+                $titular->id,
                 $licensePlain,
                 $host,
-                $user->license_email ?? $user->email
+                $emailLicencia
             );
 
             if (!data_get($resp, 'activated')) {
@@ -1588,50 +1660,65 @@ public function activarLicencia($id, LicenseService $licenses)
     return back()->withSuccess('Licencia activada para el dominio.');
 }
 
-public function desactivarLicencia($id, LicenseService $licenses)
-{
-    $user = auth()->user();
-    if (!$user) return back()->withError('Debes iniciar sesión.');
 
-    $licensePlain = $user->getLicenseKeyPlain();
-    if (!$licensePlain) return back()->withError('Tu usuario no tiene licencia registrada.');
 
-    $dominio = DominiosModel::where('id_dominio', $id)->first();
-    if (!$dominio) return back()->withError('Dominio no encontrado.');
+    public function desactivarLicencia($id, LicenseService $licenses)
+    {
+        $usuario = auth()->user();
+        if (!$usuario) return back()->withError('Debes iniciar sesión.');
 
-    $host = $this->hostFromUrl($dominio->url);
+        // Titular real (si es dependiente, usa el padre)
+        $titular = $usuario->id_usuario_padre
+            ? User::find($usuario->id_usuario_padre)
+            : $usuario;
 
-    try {
-        DB::transaction(function () use ($licenses, $user, $licensePlain, $host, $dominio) {
+        if (!$titular) return back()->withError('No se encontró el usuario titular de la licencia.');
 
-            $resp = $licenses->desactivarYRegistrar(
-                $user->id,
-                $licensePlain,
-                $host
-            );
+        // Licencia efectiva (del titular)
+        $licensePlain = $titular->getLicenseKeyPlain();
+        if (!$licensePlain) return back()->withError('El titular no tiene licencia registrada.');
 
-            // Si no estaba activado, la API puede decir "not activated on this domain"
-            // En ese caso igual lo marcamos inactivo localmente.
-            $msg = (string) data_get($resp, 'message', '');
+        $dominio = DominiosModel::where('id_dominio', $id)->first();
+        if (!$dominio) return back()->withError('Dominio no encontrado.');
 
-            $ok = (bool) data_get($resp, 'deactivated', false) || (bool) data_get($resp, 'success', false)
-                || str_contains(strtolower($msg), 'not activated');
+        $host = $this->hostFromUrl($dominio->url);
 
-            if (!$ok) {
-                throw new \Exception($msg ?: 'No se pudo desactivar la licencia.');
-            }
+        try {
+            DB::transaction(function () use ($licenses, $titular, $licensePlain, $host, $dominio) {
 
-            // Opcional: reflejarlo en tu tabla dominios
-            $dominio->estatus = 'NO';
-            $dominio->save();
-        });
+                // Importante: desactivar y registrar con el ID DEL TITULAR
+                $resp = $licenses->desactivarYRegistrar(
+                    $titular->id,
+                    $licensePlain,
+                    $host
+                );
 
-    } catch (\Throwable $e) {
-        return back()->withError('No se pudo desactivar: ' . $e->getMessage());
+                // Si no estaba activado, la API puede decir "not activated on this domain"
+                // En ese caso igual lo marcamos inactivo localmente.
+                $msg = (string) data_get($resp, 'message', '');
+
+                $ok = (bool) data_get($resp, 'deactivated', false)
+                    || (bool) data_get($resp, 'success', false)
+                    || str_contains(strtolower($msg), 'not activated');
+
+                if (!$ok) {
+                    throw new \Exception($msg ?: 'No se pudo desactivar la licencia.');
+                }
+
+                // Opcional: reflejarlo en tu tabla dominios
+                $dominio->estatus = 'NO';
+                $dominio->save();
+            });
+
+        } catch (\Throwable $e) {
+            return back()->withError('No se pudo desactivar: ' . $e->getMessage());
+        }
+
+        return back()->withSuccess('Licencia desactivada para el dominio.');
     }
 
-    return back()->withSuccess('Licencia desactivada para el dominio.');
-}
+
+
 
 
 }

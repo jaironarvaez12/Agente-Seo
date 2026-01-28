@@ -26,11 +26,11 @@
 </div>
 
           <div class="card basic-data-table">
-            @if(isset($max))
+            @if(isset($maximo))
                 <div class="alert alert-info mb-20">
                     <b>Plan:</b> {{ $plan }} |
-                    <b>Dominios activados:</b> {{ $used }} / {{ $max }} |
-                    <b>Disponibles:</b> {{ $remaining }}
+                    <b>Dominios activados:</b> {{ $usados }} / {{ $maximo }} |
+                    <b>Disponibles:</b> {{ $restantes }}
                 </div>
             @endif
            <div class="card-header text-end">

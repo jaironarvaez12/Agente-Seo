@@ -259,6 +259,7 @@
 
 <script src="{{ asset('assets/js/homeOneChart.js') }}"></script>
 
+
 @yield('scripts')
 </body>
 </html>
