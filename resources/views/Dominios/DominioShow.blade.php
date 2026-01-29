@@ -56,6 +56,10 @@
         class="btn btn-outline-danger text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2">
        Ver Reporte Generado
       </a>
+      <a href="{{ route('dominios.auto_generacion.editar', $dominio->id_dominio) }}"
+        class="btn btn-warning text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2">
+        Auto-Generación
+      </a>    
 
     </div>
     </div>
@@ -138,6 +142,68 @@
 
                                       </tr>
                                   @endforeach 
+                              </tbody>
+                              </table>
+                          </div>
+                        </div>
+                    </div>
+                    <div class="col-12 col-lg-8">
+                        <div class="bg-base radius-12 p-16 h-100">
+                      
+                          <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6 class="text-md text-primary-light mb-16">Auto Generacion de Contenido</h6>
+
+                            <a href="{{ route('dominios.auto_generacion.editar', $dominio->id_dominio) }}"
+                              class="btn btn-success">
+                              Editar
+                            </a>
+                          </div>
+                          
+                          <div class="table-responsive scroll-sm">
+                              <table class="table bordered-table sm-table mb-0">
+                              <thead>
+                                  <tr class="text-secondary-light">
+                                      <th>Estatus</th>
+                                      <th>Frecuencia</th>
+                                      <th>Contenido por Ejecucion</th>
+                                      <th>Proxima Ejecucion</th>
+                                   
+                                  </tr>
+                              </thead>
+                              <tbody>
+                                
+                             
+                                      <tr>
+                                         <td>
+                                            @if($dominio->auto_generacion_activa=='1')
+                                              <span class="bg-success-focus text-success-600 border border-success-main px-24 py-4 radius-4 fw-medium text-sm">Activo</span> 
+                                            @else
+                                              <span class="bg-danger-focus text-danger-600 border border-danger-main px-24 py-4 radius-4 fw-medium text-sm">Inactivo</span> 
+                                            @endif
+                                          </td>
+                                          <td>
+                                            @if($dominio->auto_frecuencia=='daily')
+                                              Diario
+                                            @elseif($dominio->auto_frecuencia=='hourly')
+                                              Cada hora
+                                            @elseif($dominio->auto_frecuencia=='weekly')
+                                              Semanal
+                                            @elseif($dominio->auto_frecuencia=='custom')
+                                            Personalizado cada  {{ $dominio->auto_cada_minutos}} minutos
+                                      
+                                            @endif
+                                    
+                                          </td>
+                                        
+                                          <td>{{ $dominio->auto_tareas_por_ejecucion }}</td>
+                                          <td>
+                                             
+                                              {{date('d-m-Y g:i:s A', strtotime($dominio->auto_siguiente_ejecucion))}}
+                                          </td>
+                                         
+
+                                      </tr>
+                              
                               </tbody>
                               </table>
                           </div>

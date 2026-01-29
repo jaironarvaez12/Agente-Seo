@@ -225,6 +225,16 @@ Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
 
     });
 
+    //autogenerar
+     Route::get('/dominios/{idDominio}/auto-generacion', [App\Http\Controllers\DominiosAutoGeneracionController::class, 'editar'])
+        ->name('dominios.auto_generacion.editar');
+
+    Route::post('/dominios/{idDominio}/auto-generacion', [App\Http\Controllers\DominiosAutoGeneracionController::class, 'actualizar'])
+        ->name('dominios.auto_generacion.actualizar');
+
+    Route::post('/dominios/{idDominio}/auto-generacion/ejecutar-ahora', [App\Http\Controllers\DominiosAutoGeneracionController::class, 'ejecutarAhora'])
+        ->name('dominios.auto_generacion.ejecutar_ahora');
+
 
     //rutas backlinks
     Route::post('/dominios/{dominio}/contenido/{detalle}/generar-backlinks',[App\Http\Controllers\DominiosController::class, 'generarBacklinks'])->name('dominios.contenido.generar_backlinks');
