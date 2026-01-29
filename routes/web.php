@@ -226,7 +226,8 @@ Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
     });
 
 
-
+    //rutas backlinks
+    Route::post('/dominios/{dominio}/contenido/{detalle}/generar-backlinks',[App\Http\Controllers\DominiosController::class, 'generarBacklinks'])->name('dominios.contenido.generar_backlinks');
 
 
 

@@ -156,6 +156,18 @@
                       {{ in_array($it->estatus, ['publicado','en_proceso','programado']) ? 'disabled' : '' }}>
                       <iconify-icon icon="mdi:calendar-clock" class="menu-icon"></iconify-icon>
                     </button>
+                    <form method="POST" action="{{ route('dominios.contenido.generar_backlinks', [$IdDominio, $it->id_dominio_contenido_detalle]) }}"
+                      class="m-0">
+                      @csrf
+                      <button type="submit"
+                        class="bg-primary-focus text-primary-600 bg-hover-primary-200 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle border-0"
+                        title="Generar backlinks"
+                        {{ ($it->estatus !== 'publicado' || empty($it->wp_link) || ($it->estatus_backlinks ?? '') === 'en_proceso') ? 'disabled' : '' }}>
+                        <iconify-icon icon="mdi:link-variant"></iconify-icon>
+                      </button>
+                    </form>
+
+
                   </div>
                 </td>
               </tr>

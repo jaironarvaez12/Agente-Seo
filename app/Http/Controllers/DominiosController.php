@@ -1717,7 +1717,29 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
         return back()->withSuccess('Licencia desactivada para el dominio.');
     }
 
+// backlinks
+    public function generarBacklinks($dominio, int $detalle): RedirectResponse
+    {
+        $it = Dominios_Contenido_DetallesModel::findOrFail($detalle);
 
+        // solo si ya está publicado y tiene URL
+        if ($it->estatus !== 'publicado' || empty($it->wp_link)) {
+            return back()->with('error', 'Primero debes publicar en WordPress (y tener wp_link).');
+        }
+
+        // evitar duplicados
+        if (($it->estatus_backlinks ?? '') === 'en_proceso') {
+            return back()->with('error', 'Ya hay backlinks en proceso para este contenido.');
+        }
+
+        $it->estatus_backlinks = 'en_proceso';
+        $it->error_backlinks = null;
+        $it->save();
+
+        \App\Jobs\GenerarBacklinksContenidoJob::dispatch($it->id_dominio_contenido_detalle);
+
+        return back()->with('exito', 'Backlinks en proceso.');
+    }   
 
 
 

@@ -39,26 +39,30 @@ return [
     'client_secret' => env('FACEBOOK_APP_SECRET'),
     'redirect'      => env('FACEBOOK_REDIRECT_URI'),
     'version'       => env('FACEBOOK_API_VERSION', 'v21.0'),
-],
-'wp_webhook' => [
-    'secret' => env('WP_WEBHOOK_SECRET'),
-],
-'testingseo' => [
-    'url' => env('TESTINGSEO_WP_URL', 'https://testingseo.entornodedesarrollo.es'),
-    'secret' => env('TSEO_TPL_SECRET'),
-],
-'moz' => [
-    'token' => env('MOZ_TOKEN'),
-    'base_url' => env('MOZ_BASE_URL', 'https://lsapi.seomoz.com/v2'),
-],
-'pagespeed' => [
-  'key' => env('PAGESPEED_API_KEY'),
-],
-'quickchart' => [
-    'base' => env('QUICKCHART_BASE', 'https://quickchart.io'),
-],
-'license' => [
-  'base_url' => env('LICENSE_API_BASE_URL'),
-  'timeout'  => env('LICENSE_API_TIMEOUT', 10),
-],
+    ],
+    'wp_webhook' => [
+        'secret' => env('WP_WEBHOOK_SECRET'),
+    ],
+    'testingseo' => [
+        'url' => env('TESTINGSEO_WP_URL', 'https://testingseo.entornodedesarrollo.es'),
+        'secret' => env('TSEO_TPL_SECRET'),
+    ],
+    'moz' => [
+        'token' => env('MOZ_TOKEN'),
+        'base_url' => env('MOZ_BASE_URL', 'https://lsapi.seomoz.com/v2'),
+    ],
+    'pagespeed' => [
+    'key' => env('PAGESPEED_API_KEY'),
+    ],
+    'quickchart' => [
+        'base' => env('QUICKCHART_BASE', 'https://quickchart.io'),
+    ],
+    'license' => [
+    'base_url' => env('LICENSE_API_BASE_URL'),
+    'timeout'  => env('LICENSE_API_TIMEOUT', 10),
+    ],  
+    'backlinks' => [
+    'base_url' => env('BACKLINKS_BASE_URL', 'https://backlinks.ideiweb.com'),
+    'auth_key' => env('BACKLINKS_AUTH_KEY'),
+    ],
 ];

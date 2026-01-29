@@ -26,6 +26,8 @@ class Dominios_Contenido_DetallesModel extends Model
         'wp_id'        => 'integer',
         'id_dominio_contenido' => 'integer',
         'id_dominio'           => 'integer',
+        'resultado_backlinks' => 'array',
+        'fecha_backlinks' => 'datetime',
     ];
 
     protected $fillable = [
@@ -59,5 +61,11 @@ class Dominios_Contenido_DetallesModel extends Model
         'error',
 
         'modelo',
+
+        'estatus_backlinks',
+        'resultado_backlinks',
+        'error_backlinks',
+        'fecha_backlinks',
     ];
+   
 }
