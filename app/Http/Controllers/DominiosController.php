@@ -1720,6 +1720,7 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
 // backlinks
     public function generarBacklinks($dominio, int $detalle): RedirectResponse
     {
+        dd('SI LLEGÓ AL CONTROLADOR', $dominio, $detalle);
         $it = Dominios_Contenido_DetallesModel::findOrFail($detalle);
 
         // solo si ya está publicado y tiene URL
