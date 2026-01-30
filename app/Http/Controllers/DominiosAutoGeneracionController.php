@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\DominiosModel;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-
+use App\Jobs\TrabajoAutoGenerarContenidoDominio;
 class DominiosAutoGeneracionController extends Controller
 {
     public function editar(int $idDominio)
@@ -102,24 +102,31 @@ class DominiosAutoGeneracionController extends Controller
         return back()->withSuccess('Configuración guardada correctamente.');
     }
 
-    public function ejecutarAhora(int $idDominio)
-    {
-        $usuario = auth()->user();
-        if (!$usuario) return back()->withError('Debes iniciar sesión.');
+   
 
-        $dominio = DominiosModel::where('id_dominio', (int)$idDominio)->firstOrFail();
+public function ejecutarAhora(int $idDominio)
+{
+    $usuario = auth()->user();
+    if (!$usuario) return back()->withError('Debes iniciar sesión.');
 
-        $this->validarPermisoDominio($usuario, $dominio);
+    $dominio = DominiosModel::where('id_dominio', (int)$idDominio)->firstOrFail();
+    $this->validarPermisoDominio($usuario, $dominio);
 
-        if (!(int)$dominio->auto_generacion_activa) {
-            return back()->withError('Primero activa la auto-generación para poder ejecutar ahora.');
-        }
-
-        $dominio->auto_siguiente_ejecucion = now();
-        $dominio->save();
-
-        return back()->withSuccess('Listo. Se marcó para ejecutar en el próximo ciclo del daemon.');
+    if (!(int)$dominio->auto_generacion_activa) {
+        return back()->withError('Primero activa la auto-generación para poder ejecutar ahora.');
     }
+
+    $dominio->auto_siguiente_ejecucion = now();
+    $dominio->save();
+
+    // ✅ DESPACHAR JOB YA MISMO
+    TrabajoAutoGenerarContenidoDominio::dispatch((int)$dominio->id_dominio)
+        ->onConnection('database')
+        ->onQueue('default');
+
+    return back()->withSuccess('Listo. Se ejecutó ahora mismo.');
+}
+
 
     private function validarPermisoDominio($usuario, $dominio): void
     {
