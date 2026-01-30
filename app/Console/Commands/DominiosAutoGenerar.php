@@ -9,9 +9,9 @@ use Illuminate\Console\Command;
 class DominiosAutoGenerar extends Command
 {
     protected $signature = 'dominios:auto-generar';
-    protected $description = 'Genera contenido automáticamente según la configuración del dominio';
+    protected $description = 'Despacha jobs de auto-generación para dominios que ya toca ejecutar';
 
-    public function handle()
+    public function handle(): int
     {
         $ahora = now();
 
@@ -21,29 +21,15 @@ class DominiosAutoGenerar extends Command
                 $q->whereNull('auto_siguiente_ejecucion')
                   ->orWhere('auto_siguiente_ejecucion', '<=', $ahora);
             })
+            ->limit(50)
             ->get();
 
         foreach ($dominios as $dominio) {
-            TrabajoAutoGenerarContenidoDominio::dispatch((int)$dominio->id_dominio)
+            TrabajoAutoGenerarContenidoDominio::dispatch((int)$dominio->id_dominio, false)
                 ->onConnection('database')
                 ->onQueue('default');
-
-            $dominio->auto_siguiente_ejecucion = $this->calcularSiguienteEjecucion($dominio);
-            $dominio->save();
         }
 
         return self::SUCCESS;
-    }
-
-    private function calcularSiguienteEjecucion($dominio)
-    {
-        $base = now();
-
-        return match ($dominio->auto_frecuencia) {
-            'hourly' => $base->addHour(),
-            'weekly' => $base->addWeek(),
-            'custom' => $base->addMinutes((int)$dominio->auto_cada_minutos),
-            default  => $base->addDay(), // daily
-        };
     }
 }
