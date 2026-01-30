@@ -116,7 +116,7 @@ public function ejecutarAhora(int $idDominio)
         return back()->withError('Primero activa la auto-generación para poder ejecutar ahora.');
     }
 
-    $dominio->auto_siguiente_ejecucion = now();
+    $dominio->auto_siguiente_ejecucion = now()->subSeconds(5);
     $dominio->save();
 
     // ✅ DESPACHAR JOB YA MISMO
