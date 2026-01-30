@@ -213,6 +213,10 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             'estatus'        => 'generado',
             'error'          => null,
         ]);
+        \App\Jobs\TrabajoEnviarContenidoWordPress::dispatch(
+            (int)  $registro->id_dominio,
+            (int) $registro->id_dominio_contenido_detalle
+        )->onConnection('database')->onQueue('default');
 
     } catch (\Throwable $e) {
         if ($registro) {

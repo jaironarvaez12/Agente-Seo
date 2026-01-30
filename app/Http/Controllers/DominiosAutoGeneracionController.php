@@ -30,43 +30,76 @@ class DominiosAutoGeneracionController extends Controller
         $this->validarPermisoDominio($usuario, $dominio);
 
         $datos = $request->validate([
-            'auto_generacion_activa' => 'nullable|boolean',
-            'auto_frecuencia' => 'required|in:daily,hourly,weekly,custom',
-            'auto_cada_minutos' => 'nullable|required_if:auto_frecuencia,custom|integer|min:1|max:10080', // hasta 7 días
-            'auto_tareas_por_ejecucion' => 'required|integer|min:1|max:50',
+            // AUTO-GENERACIÓN
+            'auto_generacion_activa'   => 'nullable|boolean',
+            'auto_frecuencia'          => 'required|in:daily,hourly,weekly,custom',
+            'auto_cada_minutos'        => 'nullable|required_if:auto_frecuencia,custom|integer|min:1|max:10080',
+            'auto_tareas_por_ejecucion'=> 'required|integer|min:1|max:50',
+
+            // AUTO WORDPRESS
+            'wp_auto_activo'           => 'nullable|boolean',
+            'wp_auto_modo'             => 'required|in:manual,publicar,programar',
+            'wp_programar_cada_minutos'=> 'nullable|required_if:wp_auto_modo,programar|integer|min:1|max:10080',
         ], [
+            // mensajes en español
             'auto_frecuencia.in' => 'Frecuencia inválida.',
             'auto_cada_minutos.required_if' => 'Debes indicar cada cuántos minutos cuando la frecuencia es Personalizada.',
+            'wp_auto_modo.in' => 'Modo de WordPress inválido.',
+            'wp_programar_cada_minutos.required_if' => 'Debes indicar cada cuántos minutos cuando el modo de WordPress es Programar.',
         ]);
 
-        // checkbox: si no viene, es false
-        $activo = (bool) ($request->input('auto_generacion_activa', false));
+        // =========================
+        // AUTO-GENERACIÓN
+        // =========================
 
-        $dominio->auto_generacion_activa = $activo ? 1 : 0;
+        $autoActivo = (bool) ($request->input('auto_generacion_activa', false));
+
+        $dominio->auto_generacion_activa = $autoActivo ? 1 : 0;
         $dominio->auto_frecuencia = $datos['auto_frecuencia'];
 
-        // Solo guardamos auto_cada_minutos si custom, si no -> null
         if ($datos['auto_frecuencia'] === 'custom') {
-            $dominio->auto_cada_minutos = (int) $datos['auto_cada_minutos'];
+            $dominio->auto_cada_minutos = (int) ($datos['auto_cada_minutos'] ?? 1);
         } else {
             $dominio->auto_cada_minutos = null;
         }
 
         $dominio->auto_tareas_por_ejecucion = (int) $datos['auto_tareas_por_ejecucion'];
 
-        // Si lo activas y no hay siguiente ejecución, lo ponemos para que arranque pronto
-        if ($activo && empty($dominio->auto_siguiente_ejecucion)) {
-            $dominio->auto_siguiente_ejecucion = now(); // ejecuta en el siguiente ciclo del daemon
+        if ($autoActivo && empty($dominio->auto_siguiente_ejecucion)) {
+            $dominio->auto_siguiente_ejecucion = now();
         }
 
-        // Si lo desactivas, opcionalmente puedes limpiar la siguiente ejecución
-        if (!$activo) {
+        if (!$autoActivo) {
             $dominio->auto_siguiente_ejecucion = null;
+        }
+
+        // =========================
+        // AUTO WORDPRESS
+        // =========================
+
+        $wpActivo = (bool) ($request->input('wp_auto_activo', false));
+        $dominio->wp_auto_activo = $wpActivo ? 1 : 0;
+
+        // Si WP auto está apagado, forzamos manual para evitar confusión
+        $dominio->wp_auto_modo = $wpActivo ? $datos['wp_auto_modo'] : 'manual';
+
+        if ($dominio->wp_auto_modo === 'programar') {
+            $dominio->wp_programar_cada_minutos = (int) ($datos['wp_programar_cada_minutos'] ?? 60);
+
+            if (empty($dominio->wp_siguiente_programacion)) {
+                $dominio->wp_siguiente_programacion = now()->addMinutes(10);
+            }
+        } else {
+            // Mantén un valor por defecto (o deja el existente si prefieres)
+            $dominio->wp_programar_cada_minutos = (int) ($dominio->wp_programar_cada_minutos ?? 60);
+
+            // Si quieres limpiar la siguiente programación cuando no está en programar:
+            // $dominio->wp_siguiente_programacion = null;
         }
 
         $dominio->save();
 
-        return back()->withSuccess('Configuración de auto-generación guardada correctamente.');
+        return back()->withSuccess('Configuración guardada correctamente.');
     }
 
     public function ejecutarAhora(int $idDominio)
@@ -82,7 +115,6 @@ class DominiosAutoGeneracionController extends Controller
             return back()->withError('Primero activa la auto-generación para poder ejecutar ahora.');
         }
 
-        // Forzar que toque ya
         $dominio->auto_siguiente_ejecucion = now();
         $dominio->save();
 
@@ -91,8 +123,6 @@ class DominiosAutoGeneracionController extends Controller
 
     private function validarPermisoDominio($usuario, $dominio): void
     {
-        // Misma idea que tu Generador(): dependiente solo en asignados; titular en asignados o creador
-
         $titular = $usuario->titularLicencia();
         if (!$titular) abort(403);
 
