@@ -17,7 +17,7 @@ class DominiosAutoGeneracionController extends Controller
         $dominio = DominiosModel::where('id_dominio', (int)$idDominio)->firstOrFail();
         $this->validarPermisoDominio($usuario, $dominio);
 
-        return view('dominios.auto_generacion', compact('dominio'));
+        return view('Dominios.auto_generacion', compact('dominio'));
     }
 
     public function actualizar(Request $request, int $idDominio)

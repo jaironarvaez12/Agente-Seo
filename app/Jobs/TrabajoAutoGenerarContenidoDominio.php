@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Models\DominiosModel;
 use App\Models\User;
-use App\Services\ServicioGeneradorDominio; // <- AJUSTA si tu servicio tiene otro nombre
+use App\Services\ServicioGenerarDominio; // <- AJUSTA si tu servicio tiene otro nombre
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -19,7 +19,7 @@ class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
         public bool $forzar = false
     ) {}
 
-    public function handle(ServicioGeneradorDominio $servicioGenerador)
+    public function handle(ServicioGenerarDominio $servicioGenerador)
     {
         Log::info('AUTO: job iniciado', [
             'id_dominio' => $this->idDominio,
