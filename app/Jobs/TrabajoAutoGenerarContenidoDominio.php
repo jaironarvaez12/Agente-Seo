@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Models\DominiosModel;
 use App\Models\User;
-use App\Services\ServicioGenerarDominio; // ajusta si tu servicio tiene otro nombre
+use App\Services\ServicioGenerarDominio;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -31,7 +31,6 @@ class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
 
     private function esForzado(): bool
     {
-        // fallback ultra seguro para jobs viejos
         if (!property_exists($this, 'forzar')) return false;
         return (bool) ($this->forzar ?? false);
     }
@@ -57,20 +56,13 @@ class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
             return;
         }
 
-        // ✅ solo validar "aún no toca" si NO está forzado
-        if (
-            !$forzado
-            && !empty($dominio->auto_siguiente_ejecucion)
-            && now()->lt($dominio->auto_siguiente_ejecucion)
-        ) {
-            Log::info('AUTO: aun no toca ejecutar', [
-                'id_dominio' => $dominio->id_dominio,
-                'auto_siguiente_ejecucion' => (string)$dominio->auto_siguiente_ejecucion,
-            ]);
-            return;
-        }
+        /**
+         * ✅ IMPORTANTE:
+         * Aquí YA NO validamos "aún no toca ejecutar".
+         * Eso lo decide el comando dominios:auto-generar con lock/reserva.
+         */
 
-        // ✅ Actor: creado_por, y fallback a primer asignado
+        // ✅ Actor: creado_por, fallback a primer asignado
         $actor = null;
 
         if (!empty($dominio->creado_por)) {
