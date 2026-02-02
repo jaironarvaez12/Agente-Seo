@@ -4,26 +4,45 @@ namespace App\Jobs;
 
 use App\Models\DominiosModel;
 use App\Models\User;
-use App\Services\ServicioGenerarDominio; // <- AJUSTA si tu servicio tiene otro nombre
+use App\Services\ServicioGenerarDominio; // ajusta si tu servicio tiene otro nombre
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
 {
     use Dispatchable, Queueable;
 
-    public function __construct(
-        public int $idDominio,
-        public bool $forzar = false
-    ) {}
+    public int $idDominio;
+
+    /**
+     * IMPORTANTE:
+     * No tipar para evitar romper jobs viejos serializados.
+     */
+    public $forzar = false;
+
+    public function __construct(int $idDominio, $forzar = false)
+    {
+        $this->idDominio = $idDominio;
+        $this->forzar = (bool) $forzar;
+    }
+
+    private function esForzado(): bool
+    {
+        // fallback ultra seguro para jobs viejos
+        if (!property_exists($this, 'forzar')) return false;
+        return (bool) ($this->forzar ?? false);
+    }
 
     public function handle(ServicioGenerarDominio $servicioGenerador)
     {
+        $forzado = $this->esForzado();
+
         Log::info('AUTO: job iniciado', [
             'id_dominio' => $this->idDominio,
-            'forzar' => $this->forzar,
+            'forzar' => $forzado,
         ]);
 
         $dominio = DominiosModel::where('id_dominio', (int)$this->idDominio)->first();
@@ -38,9 +57,9 @@ class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
             return;
         }
 
-        // ✅ Solo valida "aún no toca" cuando NO es forzado
+        // ✅ solo validar "aún no toca" si NO está forzado
         if (
-            !$this->forzar
+            !$forzado
             && !empty($dominio->auto_siguiente_ejecucion)
             && now()->lt($dominio->auto_siguiente_ejecucion)
         ) {
@@ -51,8 +70,24 @@ class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
             return;
         }
 
-        // Actor: el usuario principal que creó el dominio
-        $actor = User::find((int)($dominio->creado_por ?? 0));
+        // ✅ Actor: creado_por, y fallback a primer asignado
+        $actor = null;
+
+        if (!empty($dominio->creado_por)) {
+            $actor = User::find((int)$dominio->creado_por);
+        }
+
+        if (!$actor) {
+            $idAsignado = DB::table('dominios_usuarios')
+                ->where('id_dominio', (int)$dominio->id_dominio)
+                ->orderBy('id', 'asc')
+                ->value('id_usuario');
+
+            if ($idAsignado) {
+                $actor = User::find((int)$idAsignado);
+            }
+        }
+
         if (!$actor) {
             Log::warning('AUTO: actor no encontrado (creado_por)', [
                 'id_dominio' => $dominio->id_dominio,
@@ -65,10 +100,6 @@ class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
         $maxTareas = max(1, min($maxTareas, 50));
 
         try {
-            // ✅ Aquí llamas a TU lógica actual de generación (licencias, límites, etc.)
-            // Debe devolver: [ok, mensaje, jobs]
-            // jobs = arreglo de payloads para despachar GenerarContenidoKeywordJob
-
             [$ok, $mensaje, $jobs] = $servicioGenerador->iniciarGeneracion(
                 (int)$dominio->id_dominio,
                 $actor,
@@ -91,16 +122,11 @@ class TrabajoAutoGenerarContenidoDominio implements ShouldQueue
                 ]);
             }
 
-            // ✅ (Opcional recomendado): actualizar siguiente ejecución aquí SOLO si quieres
-            // Normalmente esto se maneja en el comando/daemon, no necesariamente en el job.
-
         } catch (\Throwable $e) {
             Log::error('AUTO: error en job', [
                 'id_dominio' => $dominio->id_dominio,
                 'error' => $e->getMessage(),
             ]);
-
-            // Si quieres que aparezca en failed_jobs, lanza la excepción:
             throw $e;
         }
     }
