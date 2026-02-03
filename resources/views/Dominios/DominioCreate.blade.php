@@ -36,7 +36,10 @@
                                 <b>Disponibles:</b> {{ $remaining }}
                             </div>
                             @endif
-                            @php $bloqueado = isset($remaining) && $remaining <= 0; @endphp
+                            @php
+                            $esAdmin = $esAdmin ?? false;
+                            $bloqueado = !$esAdmin && isset($remaining) && $remaining <= 0;
+                            @endphp
                            <form method="POST" action="{{ route('dominios.store') }}">
                                 @csrf
 
@@ -84,11 +87,11 @@
                                     Guardar
                                     </button>
 
-                                    @if($bloqueado)
+                                  @if($bloqueado)
                                     <div class="text-danger mt-2">
                                         Ya alcanzaste el límite de tu plan. Desactiva un dominio o mejora tu plan.
                                     </div>
-                                    @endif
+                                @endif
                                 </div>
                             </form>
 

@@ -40,21 +40,32 @@ class SeoReportController extends Controller
         return $host ?: rtrim(preg_replace('#^https?://#i', '', $url), '/');
     }
     public function generar(int $id, Request $request, LicenseService $licenses)
-    {
-        try {
+{
+    try {
         $user = auth()->user();
         if (!$user) return back()->withError('Debes iniciar sesión.');
 
-        // ✅ Titular real para licencia/plan/cupos
-        $titular = $user->titularLicencia();
-        if (!$titular) return back()->withError('No se encontró el titular de la licencia.');
+        // ✅ ADMIN por rol (Spatie). Ajusta el nombre exacto del rol:
+        $esAdmin = $user->hasRole('administrador'); // 'Administrador', 'superadmin', etc.
 
-        $licensePlain = $titular->getLicenseKeyPlain();
-        if (!$licensePlain) return back()->withError('El titular no tiene licencia registrada.');
+        // Solo se usan si NO es admin
+        $titular = null;
+        $licensePlain = null;
+        $emailLicencia = null;
 
-        $emailLicencia = $titular->license_email ?? $titular->email;
+        if (!$esAdmin) {
+            $titular = $user->titularLicencia();
+            if (!$titular) return back()->withError('No se encontró el titular de la licencia.');
 
-        [$ok, $msg, $redirectUrl] = DB::transaction(function () use ($id, $request, $licenses, $licensePlain, $user, $titular, $emailLicencia) {
+            $licensePlain = $titular->getLicenseKeyPlain();
+            if (!$licensePlain) return back()->withError('El titular no tiene licencia registrada.');
+
+            $emailLicencia = $titular->license_email ?? $titular->email;
+        }
+
+        [$ok, $msg, $redirectUrl] = DB::transaction(function () use (
+            $id, $request, $licenses, $licensePlain, $user, $titular, $emailLicencia, $esAdmin
+        ) {
 
             // ============================
             // 0) Cargar dominio
@@ -68,100 +79,114 @@ class SeoReportController extends Controller
             }
 
             // ============================
-            // 1) Permiso: el usuario logueado debe tener este dominio asignado
+            // 1) Permiso dominio (solo NO admin)
             // ============================
-            $dominiosIdsDelUser = DB::table('dominios_usuarios')
-                ->where('id_usuario', (int) $user->id)     // <-- tu columna
-                ->pluck('id_dominio')                      // <-- tu columna
-                ->map(fn($v) => (int)$v)
-                ->all();
+            if (!$esAdmin) {
+                $dominiosIdsDelUser = DB::table('dominios_usuarios')
+                    ->where('id_usuario', (int) $user->id)
+                    ->pluck('id_dominio')
+                    ->map(fn($v) => (int)$v)
+                    ->all();
 
-            if (!in_array((int)$id, $dominiosIdsDelUser, true)) {
-                return [false, 'No tienes permiso para generar reportes en este dominio.', null];
-            }
-
-            $host = $this->hostFromUrl($dominio->url);
-
-            // ✅ límites API (fresh) usando licencia/email del TITULAR
-            $planResp = $licenses->getPlanLimitsAuto($licensePlain, $host, $emailLicencia);
-            $plan   = (string) ($planResp['plan'] ?? 'free');
-            $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
-
-            // ✅ max reportes por dominio
-            $maxReportsPerDomain = (int) ($limits['max_report'] ?? ($limits['max_reports'] ?? 0));
-            if ($maxReportsPerDomain <= 0) {
-                return [false, "Tu plan ($plan) no permite generar reportes SEO o el dominio no está activado.", null];
-            }
-
-            // ✅ max dominios activos (API lo llama max_activations)
-            $maxActiveDomains = (int) ($limits['max_activations'] ?? 0);
-            if ($maxActiveDomains <= 0) {
-                return [false, "Tu plan ($plan) no permite activar dominios (max_activations inválido).", null];
-            }
-
-            // ✅ rango real de consumo por vigencia (validity_start / validity_end)
-            [$desde, $hasta, $w] = $licenses->licenseUsageRange($planResp);
-
-            if (!$w['is_active']) {
-                $endTxt = $w['end'] ? $w['end']->setTimezone(config('app.timezone'))->format('d/m/Y h:i A') : 'N/D';
-                return [false, "Licencia inactiva o vencida. Expira: {$endTxt}. No puedes generar reportes.", null];
+                if (!in_array((int)$id, $dominiosIdsDelUser, true)) {
+                    return [false, 'No tienes permiso para generar reportes en este dominio.', null];
+                }
             }
 
             // ✅ statuses que consumen cupo
             $statusesQueConsumenCupo = ['encolado', 'generando', 'en_proceso', 'ok', 'generado'];
 
-            // =========================================================
-            // 2) CUPO POR DOMINIO (max_report)
-            // =========================================================
-            $ocupadosDominio = (int) SeoReport::where('id_dominio', (int)$dominio->id_dominio)
-                ->where('created_at', '>=', $desde)
-                ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
-                ->whereIn('status', $statusesQueConsumenCupo)
-                ->count();
+            // ============================
+            // 2) Licencia / límites (solo NO admin)
+            // ============================
+            if ($esAdmin) {
+                $plan = 'admin';
+                $desde = now()->subYears(50);
+                $hasta = null;
 
-            if ($ocupadosDominio >= $maxReportsPerDomain) {
-                $tz = config('app.timezone');
-                $dTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
-                $hTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
+                // Para mensaje final (no aplica realmente)
+                $maxReportsPerDomain = PHP_INT_MAX;
+                $maxActiveDomains = PHP_INT_MAX;
 
-                return [false,
-                    "Límite por dominio alcanzado: {$ocupadosDominio}/{$maxReportsPerDomain}. Ventana: {$dTxt} → {$hTxt} (plan {$plan}).",
-                    null
-                ];
+                // Para mensaje final
+                $ocupadosDominio = 0;
+                $ocupadosGlobal  = 0;
+                $maxGlobal = PHP_INT_MAX;
+            } else {
+                $host = $this->hostFromUrl($dominio->url);
+
+                $planResp = $licenses->getPlanLimitsAuto($licensePlain, $host, $emailLicencia);
+                $plan   = (string) ($planResp['plan'] ?? 'free');
+                $limits = $licenses->normalizeLimits($plan, (array) ($planResp['limits'] ?? []));
+
+                $maxReportsPerDomain = (int) ($limits['max_report'] ?? ($limits['max_reports'] ?? 0));
+                if ($maxReportsPerDomain <= 0) {
+                    return [false, "Tu plan ($plan) no permite generar reportes SEO o el dominio no está activado.", null];
+                }
+
+                $maxActiveDomains = (int) ($limits['max_activations'] ?? 0);
+                if ($maxActiveDomains <= 0) {
+                    return [false, "Tu plan ($plan) no permite activar dominios (max_activations inválido).", null];
+                }
+
+                [$desde, $hasta, $w] = $licenses->licenseUsageRange($planResp);
+
+                if (!$w['is_active']) {
+                    $endTxt = $w['end'] ? $w['end']->setTimezone(config('app.timezone'))->format('d/m/Y h:i A') : 'N/D';
+                    return [false, "Licencia inactiva o vencida. Expira: {$endTxt}. No puedes generar reportes.", null];
+                }
+
+                // =========================================================
+                // 3) CUPO POR DOMINIO
+                // =========================================================
+                $ocupadosDominio = (int) SeoReport::where('id_dominio', (int)$dominio->id_dominio)
+                    ->where('created_at', '>=', $desde)
+                    ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
+                    ->whereIn('status', $statusesQueConsumenCupo)
+                    ->count();
+
+                if ($ocupadosDominio >= $maxReportsPerDomain) {
+                    $tz = config('app.timezone');
+                    $dTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
+                    $hTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
+
+                    return [false,
+                        "Límite por dominio alcanzado: {$ocupadosDominio}/{$maxReportsPerDomain}. Ventana: {$dTxt} → {$hTxt} (plan {$plan}).",
+                        null
+                    ];
+                }
+
+                // =========================================================
+                // 4) CUPO GLOBAL
+                // =========================================================
+                $maxGlobal = $maxActiveDomains * $maxReportsPerDomain;
+
+                $dominiosIdsDelTitular = DB::table('dominios_usuarios')
+                    ->where('id_usuario', (int) $titular->id)
+                    ->pluck('id_dominio')
+                    ->map(fn($v) => (int)$v)
+                    ->all();
+
+                $ocupadosGlobal = (int) SeoReport::whereIn('id_dominio', $dominiosIdsDelTitular)
+                    ->where('created_at', '>=', $desde)
+                    ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
+                    ->whereIn('status', $statusesQueConsumenCupo)
+                    ->count();
+
+                if ($ocupadosGlobal >= $maxGlobal) {
+                    $tz = config('app.timezone');
+                    $dTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
+                    $hTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
+
+                    return [false,
+                        "Límite GLOBAL alcanzado: {$ocupadosGlobal}/{$maxGlobal} (= {$maxActiveDomains} dominios x {$maxReportsPerDomain} reportes). Ventana: {$dTxt} → {$hTxt} (plan {$plan}).",
+                        null
+                    ];
+                }
             }
 
             // =========================================================
-            // 3) CUPO GLOBAL (compartido por licencia del titular)
-            //    = max_activations * max_report
-            // =========================================================
-            $maxGlobal = $maxActiveDomains * $maxReportsPerDomain;
-
-            // ✅ Para cupo global compartido: dominios del TITULAR
-            $dominiosIdsDelTitular = DB::table('dominios_usuarios')
-                ->where('id_usuario', (int) $titular->id)
-                ->pluck('id_dominio')
-                ->map(fn($v) => (int)$v)
-                ->all();
-
-            $ocupadosGlobal = (int) SeoReport::whereIn('id_dominio', $dominiosIdsDelTitular)
-                ->where('created_at', '>=', $desde)
-                ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
-                ->whereIn('status', $statusesQueConsumenCupo)
-                ->count();
-
-            if ($ocupadosGlobal >= $maxGlobal) {
-                $tz = config('app.timezone');
-                $dTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
-                $hTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
-
-                return [false,
-                    "Límite GLOBAL alcanzado: {$ocupadosGlobal}/{$maxGlobal} (= {$maxActiveDomains} dominios x {$maxReportsPerDomain} reportes). Ventana: {$dTxt} → {$hTxt} (plan {$plan}).",
-                    null
-                ];
-            }
-
-            // =========================================================
-            // 4) Rango del reporte (preset)
+            // 5) Rango del reporte (preset)
             // =========================================================
             $preset = $request->input('preset', 'last_30');
 
@@ -188,7 +213,7 @@ class SeoReportController extends Controller
             }
 
             // =========================================================
-            // 5) Crear reporte + jobs
+            // 6) Crear reporte + jobs
             // =========================================================
             $report = SeoReport::create([
                 'id_dominio'   => $dominio->id_dominio,
@@ -216,16 +241,20 @@ class SeoReportController extends Controller
                 ->delay(now()->addSeconds(5));
 
             // =========================================================
-            // 6) Mensaje
+            // 7) Mensaje
             // =========================================================
-            $tz = config('app.timezone');
-            $dTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
-            $hTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
+            if ($esAdmin) {
+                $msg = "Reporte SEO en generación. Periodo: {$start} a {$end}. (admin: sin límites de licencia)";
+            } else {
+                $tz = config('app.timezone');
+                $dTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
+                $hTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
 
-            $msg = "Reporte SEO en generación. Periodo: {$start} a {$end}. "
-                . "Dominio: " . ($ocupadosDominio + 1) . "/{$maxReportsPerDomain}. "
-                . "Global: " . ($ocupadosGlobal + 1) . "/{$maxGlobal} (= {$maxActiveDomains} dominios x {$maxReportsPerDomain}). "
-                . "Ventana: {$dTxt} → {$hTxt} (plan {$plan}).";
+                $msg = "Reporte SEO en generación. Periodo: {$start} a {$end}. "
+                    . "Dominio: " . ($ocupadosDominio + 1) . "/{$maxReportsPerDomain}. "
+                    . "Global: " . ($ocupadosGlobal + 1) . "/{$maxGlobal} (= {$maxActiveDomains} dominios x {$maxReportsPerDomain}). "
+                    . "Ventana: {$dTxt} → {$hTxt} (plan {$plan}).";
+            }
 
             return [true, $msg, route('dominios.reporte_seo.ver', $dominio->id_dominio)];
         });
@@ -237,7 +266,8 @@ class SeoReportController extends Controller
     } catch (\Throwable $e) {
         return back()->withError('Error al generar reporte: ' . $e->getMessage());
     }
-    }
+}
+
     public function ver($id_dominio)
     {
         $dominio = DominiosModel::findOrFail($id_dominio);

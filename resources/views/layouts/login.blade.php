@@ -57,8 +57,8 @@
     <div class="auth-right py-32 px-24 d-flex flex-column justify-content-center">
         <div class="max-w-464-px mx-auto w-100">
             <div>
-                <a href="index.html" class="mb-40 max-w-290-px">
-                    <img src="assets/images/logo-idei-pequeño.png" alt="">
+                <a href="index.html" class="max-w-290-px">
+                <img src="assets/images/logo-idei.png" alt="" style="height:220px;width:auto;object-fit:contain;">
                 </a>
                 <h4 class="mb-12">Inicio de Sesion</h4>
 

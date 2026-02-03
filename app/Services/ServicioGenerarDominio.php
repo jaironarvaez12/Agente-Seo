@@ -27,136 +27,123 @@ class ServicioGenerarDominio
      */
     public function iniciarGeneracion(int $idDominio, $actor, ?int $maxTareas = null): array
     {
-        if (!$actor) return [false, 'Debes iniciar sesión.', []];
+         if (!$actor) return [false, 'Debes iniciar sesión.', []];
 
-        // Titular real (si el actor fuera dependiente, usaría el padre)
-        $titular = $actor->titularLicencia();
-        if (!$titular) return [false, 'No se encontró el titular de la licencia.', []];
+    // ✅ ADMIN por ROL (Spatie)
+        $esAdmin = $actor->hasRole('administrador'); // ajusta el nombre exacto: 'Administrador', 'superadmin', etc.
 
-        // Licencia del titular
-        $licenciaPlano = $titular->getLicenseKeyPlain();
-        if (!$licenciaPlano) return [false, 'El titular no tiene licencia registrada.', []];
+        $titular = null;
+        $licenciaPlano = null;
+        $emailLicencia = null;
 
-        $emailLicencia = $titular->license_email ?? $titular->email;
+        // Solo pedir licencia si NO es admin
+        if (!$esAdmin) {
+            $titular = $actor->titularLicencia();
+            if (!$titular) return [false, 'No se encontró el titular de la licencia.', []];
 
+            $licenciaPlano = $titular->getLicenseKeyPlain();
+            if (!$licenciaPlano) return [false, 'El titular no tiene licencia registrada.', []];
+
+            $emailLicencia = $titular->license_email ?? $titular->email;
+        }
         try {
-            [$ok, $mensaje, $trabajosParaDespachar] = DB::transaction(function () use ($idDominio, $actor, $titular, $licenciaPlano, $emailLicencia, $maxTareas) {
-
-                // Lock para evitar doble click / dobles ejecuciones
+            [$ok, $mensaje, $trabajosParaDespachar] = DB::transaction(function () use (
+                $idDominio, $actor, $titular, $licenciaPlano, $emailLicencia, $maxTareas, $esAdmin
+            ) {
                 $dominio = DominiosModel::where('id_dominio', (int)$idDominio)
                     ->lockForUpdate()
                     ->first();
 
                 if (!$dominio) return [false, 'Dominio no encontrado.', []];
 
-                $host = $this->obtenerHostDesdeUrl($dominio->url);
+                // =========================
+                // ✅ LICENCIA / CUPOS
+                // =========================
+                if ($esAdmin) {
+                    $plan = 'admin';
+                    $desde = now()->subYears(50);
+                    $hasta = null;
+                    $maxContenido = PHP_INT_MAX;
+                    $maxDominiosActivos = PHP_INT_MAX;
+                } else {
+                    $host = $this->obtenerHostDesdeUrl($dominio->url);
 
-                // límites API con el titular
-                $respPlan = $this->servicioLicencias->getPlanLimitsAuto($licenciaPlano, $host, $emailLicencia);
+                    $respPlan = $this->servicioLicencias->getPlanLimitsAuto($licenciaPlano, $host, $emailLicencia);
+                    $plan = (string)($respPlan['plan'] ?? 'free');
+                    $limites = $this->servicioLicencias->normalizeLimits($plan, (array)($respPlan['limits'] ?? []));
 
-                $plan   = (string) ($respPlan['plan'] ?? 'free');
-                $limites = $this->servicioLicencias->normalizeLimits($plan, (array) ($respPlan['limits'] ?? []));
+                    $maxContenido = (int)($limites['max_content'] ?? 0);
+                    if ($maxContenido <= 0) {
+                        return [false, "Tu plan ($plan) no permite generar contenido o el dominio no está activado.", []];
+                    }
 
-                $maxContenido = (int) ($limites['max_content'] ?? 0);
-                if ($maxContenido <= 0) {
-                    return [false, "Tu plan ($plan) no permite generar contenido o el dominio no está activado.", []];
-                }
+                    [$desde, $hasta, $infoVentana] = $this->servicioLicencias->licenseUsageRange($respPlan);
+                    if (!$infoVentana['is_active']) {
+                        $finTxt = $infoVentana['end']
+                            ? $infoVentana['end']->setTimezone(config('app.timezone'))->format('d/m/Y h:i A')
+                            : 'N/D';
+                        return [false, "Tu licencia no está activa o está vencida. Expira: {$finTxt}.", []];
+                    }
 
-                // rango de vigencia
-                [$desde, $hasta, $infoVentana] = $this->servicioLicencias->licenseUsageRange($respPlan);
-
-                if (!$infoVentana['is_active']) {
-                    $finTxt = $infoVentana['end']
-                        ? $infoVentana['end']->setTimezone(config('app.timezone'))->format('d/m/Y h:i A')
-                        : 'N/D';
-
-                    return [false, "Tu licencia no está activa o está vencida. Expira: {$finTxt}.", []];
-                }
-
-                $maxDominiosActivos = (int) ($limites['max_activations'] ?? 0);
-                if ($maxDominiosActivos <= 0) {
-                    return [false, "Tu plan ($plan) no permite activar dominios (max_activations inválido).", []];
-                }
-
-                // =========================================================
-                // 0) PERMISO SOBRE DOMINIO
-                // =========================================================
-                $dominiosAsignadosAlActor = DB::table('dominios_usuarios')
-                    ->where('id_usuario', (int) $actor->id)
-                    ->pluck('id_dominio')
-                    ->map(fn ($v) => (int) $v)
-                    ->all();
-
-                $actorEsTitular = is_null($actor->id_usuario_padre);
-
-                $actorEsCreadorDelDominio = false;
-                if ($actorEsTitular) {
-                    $actorEsCreadorDelDominio = DB::table('dominios')
-                        ->where('id_dominio', (int) $idDominio)
-                        ->where('creado_por', (int) $titular->id)
-                        ->exists();
-                }
-
-                if (!in_array((int) $idDominio, $dominiosAsignadosAlActor, true) && !$actorEsCreadorDelDominio) {
-                    return [false, 'No tienes permiso para generar contenido en este dominio.', []];
+                    $maxDominiosActivos = (int)($limites['max_activations'] ?? 0);
+                    if ($maxDominiosActivos <= 0) {
+                        return [false, "Tu plan ($plan) no permite activar dominios (max_activations inválido).", []];
+                    }
                 }
 
                 // =========================================================
-                // 1) CUPO POR DOMINIO
+                // 1) CUPO POR DOMINIO (solo NO admin)
                 // =========================================================
-                $ocupadosDominio = (int) Dominios_Contenido_DetallesModel::where('id_dominio', (int)$idDominio)
-                    ->whereIn('tipo', ['post','page'])
-                    ->where('created_at', '>=', $desde)
-                    ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
-                    ->whereIn('estatus', ['encolado','en_proceso','generado','programado','publicado'])
-                    ->count();
+                if (!$esAdmin) {
+                    $ocupadosDominio = (int) Dominios_Contenido_DetallesModel::where('id_dominio', (int)$idDominio)
+                        ->whereIn('tipo', ['post','page'])
+                        ->where('created_at', '>=', $desde)
+                        ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
+                        ->whereIn('estatus', ['encolado','en_proceso','generado','programado','publicado'])
+                        ->count();
 
-                if ($ocupadosDominio >= $maxContenido) {
-                    $tz = config('app.timezone');
-                    $desdeTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
-                    $hastaTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
-                    return [false, "Límite por dominio alcanzado: $ocupadosDominio / $maxContenido. Vigencia: $desdeTxt → $hastaTxt (plan $plan).", []];
+                    if ($ocupadosDominio >= $maxContenido) {
+                        $tz = config('app.timezone');
+                        $desdeTxt = $desde->copy()->setTimezone($tz)->format('d/m/Y h:i A');
+                        $hastaTxt = $hasta ? $hasta->copy()->setTimezone($tz)->format('d/m/Y h:i A') : 'N/D';
+                        return [false, "Límite por dominio alcanzado: $ocupadosDominio / $maxContenido. Vigencia: $desdeTxt → $hastaTxt (plan $plan).", []];
+                    }
+
+                    $restanteDominio = $maxContenido - $ocupadosDominio;
+
+                    // =========================================================
+                    // 2) CUPO GLOBAL (solo NO admin)
+                    // =========================================================
+                    $maxGlobal = $maxDominiosActivos * $maxContenido;
+
+                    $dominiosDelTitular = DB::table('dominios_usuarios')
+                        ->where('id_usuario', (int)$titular->id)
+                        ->pluck('id_dominio')
+                        ->map(fn ($v) => (int)$v)
+                        ->all();
+
+                    $ocupadosGlobal = (int) Dominios_Contenido_DetallesModel::whereIn('id_dominio', $dominiosDelTitular)
+                        ->whereIn('tipo', ['post','page'])
+                        ->where('created_at', '>=', $desde)
+                        ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
+                        ->whereIn('estatus', ['encolado','en_proceso','generado','programado','publicado'])
+                        ->count();
+
+                    if ($ocupadosGlobal >= $maxGlobal) {
+                        return [false, "Límite GLOBAL alcanzado: $ocupadosGlobal / $maxGlobal. (plan $plan).", []];
+                    }
+
+                    $restanteGlobal = $maxGlobal - $ocupadosGlobal;
+
+                    $restante = min($restanteDominio, $restanteGlobal);
+                } else {
+                    $restante = PHP_INT_MAX; // admin sin cupo
                 }
 
-                $restanteDominio = $maxContenido - $ocupadosDominio;
-
-                // =========================================================
-                // 2) CUPO GLOBAL (titular)
-                // =========================================================
-                $maxGlobal = $maxDominiosActivos * $maxContenido;
-
-                $dominiosDelTitular = DB::table('dominios_usuarios')
-                    ->where('id_usuario', (int) $titular->id)
-                    ->pluck('id_dominio')
-                    ->map(fn ($v) => (int) $v)
-                    ->all();
-
-                $ocupadosGlobal = (int) Dominios_Contenido_DetallesModel::whereIn('id_dominio', $dominiosDelTitular)
-                    ->whereIn('tipo', ['post','page'])
-                    ->where('created_at', '>=', $desde)
-                    ->when($hasta, fn($q) => $q->where('created_at', '<', $hasta))
-                    ->whereIn('estatus', ['encolado','en_proceso','generado','programado','publicado'])
-                    ->count();
-
-                if ($ocupadosGlobal >= $maxGlobal) {
-                    $desdeTxt = $desde->toDateTimeString();
-                    $hastaTxt = $hasta ? $hasta->toDateTimeString() : 'N/D';
-                    return [false, "Límite GLOBAL alcanzado: $ocupadosGlobal / $maxGlobal. Ventana: $desdeTxt → $hastaTxt (plan $plan).", []];
-                }
-
-                $restanteGlobal = $maxGlobal - $ocupadosGlobal;
-
-                // restante final (respeta dominio + global)
-                $restante = min($restanteDominio, $restanteGlobal);
-
-                if ($restante <= 0) {
-                    return [false, "No hay cupo disponible. Dominio: $ocupadosDominio/$maxContenido. Global: $ocupadosGlobal/$maxGlobal.", []];
-                }
-
-                // límite extra para automático (sin saltarse licencias)
                 if ($maxTareas !== null && $maxTareas > 0) {
                     $restante = min($restante, $maxTareas);
                 }
+
 
                 // =========================================================
                 // 3) CONFIGURACIONES
