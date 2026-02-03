@@ -56,10 +56,10 @@
         class="btn btn-outline-danger text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2">
        Ver Reporte Generado
       </a>
-      <a href="{{ route('dominios.auto_generacion.editar', $dominio->id_dominio) }}"
+      {{-- <a href="{{ route('dominios.auto_generacion.editar', $dominio->id_dominio) }}"
         class="btn btn-warning text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2">
         Auto-Generación
-      </a>    
+      </a>     --}}
 
     </div>
     </div>

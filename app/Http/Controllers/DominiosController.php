@@ -206,39 +206,59 @@ class DominiosController extends Controller
 
     $host = $this->hostFromUrl($request->input('url'));
 
-    // ✅ ADMIN: sin licencia, sin cupos, sin probe
+    // =======================
+    // ✅ ADMIN (sin licencia)
+    // =======================
     if ($esAdmin) {
-        $IdDominio = (int) DominiosModel::max('id_dominio') + 1;
-
         try {
-            DB::transaction(function () use ($request, $IdDominio, $user) {
+            DB::transaction(function () use ($request, $user) {
 
+                // 1) Generar ID dominio manual con lock
+                $IdDominio = (int) DB::table('dominios')->lockForUpdate()->max('id_dominio') + 1;
+
+                // 2) Crear dominio
                 DominiosModel::create([
                     'id_dominio' => $IdDominio,
-                    'url'        => $request['url'],
-                    'nombre'     => strtoupper($request['nombre']),
+                    'url'        => $request->input('url'),
+                    'nombre'     => strtoupper($request->input('nombre')),
                     'estatus'    => 'SI',
-                    'creado_por' => $user->id,
+                    'creado_por' => (int) $user->id,
                 ]);
 
-                // Opcional: asignar dominio al usuario en dominios_usuarios
-                DB::table('dominios_usuarios')->updateOrInsert(
-                    [
-                        'id_usuario' => (int)$user->id,
-                        'id_dominio' => (int)$IdDominio,
-                    ],
-                    []
-                );
+                // 3) Asignación al usuario (opcional)
+                $existe = DB::table('dominios_usuarios')
+                    ->where('id_usuario', (int) $user->id)
+                    ->where('id_dominio', (int) $IdDominio)
+                    ->exists();
+
+                if (!$existe) {
+                    $nextId = (int) DB::table('dominios_usuarios')
+                        ->lockForUpdate()
+                        ->max('id_dominio_usuario') + 1;
+
+                    DB::table('dominios_usuarios')->insert([
+                        'id_dominio_usuario' => $nextId, // ✅ obligatorio
+                        'id_usuario'         => (int) $user->id,
+                        'id_dominio'         => (int) $IdDominio,
+                        'fecha_creacion'     => now(),
+                        'creado_por'         => (int) $user->id,
+                    ]);
+                }
             });
 
         } catch (\Throwable $ex) {
-            return back()->withError('Ocurrió un error al crear el dominio (admin): ' . $ex->getMessage())->withInput();
+            return back()
+                ->withError('Ocurrió un error al crear el dominio (admin): ' . $ex->getMessage())
+                ->withInput();
         }
 
-        return redirect("dominios")->withSuccess('El Dominio se ha creado exitosamente (admin: sin licencia).');
+        return redirect("dominios")
+            ->withSuccess('El Dominio se ha creado exitosamente (admin: sin licencia).');
     }
 
-    // ---------------- NO ADMIN ----------------
+    // =======================
+    // -------- NO ADMIN ------
+    // =======================
 
     // ✅ Titular real para compartir cupo
     $titular = $user->titularLicencia();
@@ -257,7 +277,7 @@ class DominiosController extends Controller
     $plan = 'pro';
     $max = (int) config("licenses.max_by_plan.$plan", 0);
 
-    $usedLocal = (int) LicenciaDominiosActivacionModel::where('user_id', $titular->id)
+    $usedLocal = (int) LicenciaDominiosActivacionModel::where('user_id', (int) $titular->id)
         ->where('license_key', sha1($licensePlain))
         ->where('estatus', 'activo')
         ->count();
@@ -265,7 +285,9 @@ class DominiosController extends Controller
     $remainingLocal = max(0, $max - $usedLocal);
 
     if ($max > 0 && $remainingLocal <= 0) {
-        return back()->withError("Ya alcanzaste el límite de tu plan ($plan): máximo $max dominios activos.")->withInput();
+        return back()
+            ->withError("Ya alcanzaste el límite de tu plan ($plan): máximo $max dominios activos.")
+            ->withInput();
     }
 
     // ✅ PROBE (fuente de verdad) con finally para no dejar slots ocupados
@@ -276,39 +298,61 @@ class DominiosController extends Controller
 
         if (!data_get($probeResp, 'activated')) {
             $msg = data_get($probeResp, 'message', 'No hay cupo disponible.');
-            return back()->withError("No tienes activaciones disponibles en el servidor de licencias. ($msg)")->withInput();
+            return back()
+                ->withError("No tienes activaciones disponibles en el servidor de licencias. ($msg)")
+                ->withInput();
         }
     } catch (\Throwable $e) {
-        return back()->withError('No se pudo verificar cupo de activaciones: ' . $e->getMessage())->withInput();
+        return back()
+            ->withError('No se pudo verificar cupo de activaciones: ' . $e->getMessage())
+            ->withInput();
     } finally {
-        try { $licenses->deactivate($licensePlain, $probe); } catch (\Throwable $e) { /* log */ }
+        try {
+            $licenses->deactivate($licensePlain, $probe);
+        } catch (\Throwable $e) {
+            // opcional: log
+        }
     }
 
-    $IdDominio = (int) DominiosModel::max('id_dominio') + 1;
-
+    // Crear + asignar + activar
     try {
-        DB::transaction(function () use ($request, $IdDominio, $licenses, $user, $titular, $licensePlain, $host, $email) {
+        DB::transaction(function () use ($request, $licenses, $user, $titular, $licensePlain, $host, $email) {
 
+            // 1) ID dominio manual con lock
+            $IdDominio = (int) DB::table('dominios')->lockForUpdate()->max('id_dominio') + 1;
+
+            // 2) Crear dominio
             DominiosModel::create([
                 'id_dominio' => $IdDominio,
-                'url'        => $request['url'],
-                'nombre'     => strtoupper($request['nombre']),
+                'url'        => $request->input('url'),
+                'nombre'     => strtoupper($request->input('nombre')),
                 'estatus'    => 'SI',
-                'creado_por' => $user->id,
+                'creado_por' => (int) $user->id,
             ]);
 
-            // ✅ registrar asignación del dominio (opcional pero recomendado)
-            DB::table('dominios_usuarios')->updateOrInsert(
-                [
-                    'id_usuario' => (int)$titular->id,
-                    'id_dominio' => (int)$IdDominio,
-                ],
-                []
-            );
+            // 3) Asignar dominio al TITULAR (cupo compartido)
+            $existe = DB::table('dominios_usuarios')
+                ->where('id_usuario', (int) $titular->id)
+                ->where('id_dominio', (int) $IdDominio)
+                ->exists();
 
-            // ✅ Activar y registrar con ID DEL TITULAR (cupo compartido)
+            if (!$existe) {
+                $nextId = (int) DB::table('dominios_usuarios')
+                    ->lockForUpdate()
+                    ->max('id_dominio_usuario') + 1;
+
+                DB::table('dominios_usuarios')->insert([
+                    'id_dominio_usuario' => $nextId, // ✅ obligatorio
+                    'id_usuario'         => (int) $titular->id,
+                    'id_dominio'         => (int) $IdDominio,
+                    'fecha_creacion'     => now(),
+                    'creado_por'         => (int) $user->id,
+                ]);
+            }
+
+            // 4) Activar + registrar con ID DEL TITULAR
             $resp = $licenses->activarYRegistrar(
-                $titular->id,
+                (int) $titular->id,
                 $licensePlain,
                 $host,
                 $email
@@ -320,10 +364,13 @@ class DominiosController extends Controller
         });
 
     } catch (\Throwable $ex) {
-        return back()->withError('Ocurrió un error al crear/activar el dominio: ' . $ex->getMessage())->withInput();
+        return back()
+            ->withError('Ocurrió un error al crear/activar el dominio: ' . $ex->getMessage())
+            ->withInput();
     }
 
-    return redirect("dominios")->withSuccess('El Dominio se ha creado y activado exitosamente');
+    return redirect("dominios")
+        ->withSuccess('El Dominio se ha creado y activado exitosamente');
 }
 
 
