@@ -184,10 +184,14 @@
       <li class="dropdown">
         <a href="#" class="submenu-toggle">
           <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
-          <span>Seos</span>
+          <span>Seo</span>
         </a>
+        
 
         <ul class="sidebar-submenu">
+           <li>
+            <a href="{{ route('dashboardseo') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Dashboard</a>
+          </li>
           <li class="dropdown">
             <a href="#" class="submenu-toggle">
               <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
