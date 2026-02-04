@@ -175,20 +175,19 @@ class ServicioGenerarDominio
                 // =========================================================
                 // 4) CONSTRUIR TAREAS
                 // =========================================================
-                $tareas = [];
+               $tareas = [];
 
                 foreach ($configs as $config) {
                     $tipo = $config->tipo_normalizado;
 
                     $raw = (string)$config->palabras_claves;
                     $palabras = json_decode($raw, true);
+
                     if (!is_array($palabras)) {
                         $palabras = array_values(array_filter(array_map('trim', explode(',', $raw))));
                     }
 
                     if (!$palabras) continue;
-
-                    $palabras = array_slice($palabras, 0, 5);
 
                     foreach ($palabras as $kw) {
                         $kw = trim((string)$kw);
@@ -199,6 +198,11 @@ class ServicioGenerarDominio
                             'tipo' => (string)$tipo,
                             'keyword' => $kw,
                         ];
+
+                        // ✅ Si NO es admin, parar cuando se complete el cupo ($restante)
+                        if ($restante !== PHP_INT_MAX && count($tareas) >= $restante) {
+                            break 2; // sale del foreach de palabras y del foreach de configs
+                        }
                     }
                 }
 

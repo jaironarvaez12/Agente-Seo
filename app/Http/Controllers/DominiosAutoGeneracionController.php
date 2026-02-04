@@ -12,6 +12,7 @@ class DominiosAutoGeneracionController extends Controller
     public function editar(int $idDominio)
     {
         $usuario = auth()->user();
+        //dd($usuario );
         if (!$usuario) abort(403);
 
         $dominio = DominiosModel::where('id_dominio', (int)$idDominio)->firstOrFail();
@@ -121,11 +122,14 @@ class DominiosAutoGeneracionController extends Controller
 
     private function validarPermisoDominio($usuario, $dominio): void
     {
+        // ✅ EXCEPCIÓN: Administrador puede entrar siempre
+       if ($usuario->hasRole('administrador')) return;
+
         $titular = $usuario->titularLicencia();
         if (!$titular) abort(403);
 
         $dominiosAsignados = DB::table('dominios_usuarios')
-            ->where('id_usuario', (int) $usuario->id)
+            ->where('id_usuario', (int) $titular->id)   // recomendado si manejas titular/subusuarios
             ->pluck('id_dominio')
             ->map(fn ($v) => (int) $v)
             ->all();
