@@ -379,8 +379,9 @@ class DominiosController extends Controller
      */
     public function show(string $IdDominio)
     {
-           $dominio = DominiosModel::find($IdDominio);
-       $generadores=Dominios_ContenidoModel::all()->where('id_dominio','=',$IdDominio);
+        $dominio = DominiosModel::find($IdDominio);
+        $generadores=Dominios_ContenidoModel::Dominios($IdDominio);
+       // dd($generadores);
        return view('Dominios.DominioShow',compact('dominio','generadores'));
     }
 

@@ -110,6 +110,7 @@
                               <thead>
                                   <tr class="text-secondary-light">
                                       <th>Tipo de Generador</th>
+                                      <th>Num de Palabras</th>
                                       <th>Palabras Clave</th>
                                       <th>Estatus</th>
                                       <th>Accion</th>
@@ -121,7 +122,10 @@
                                       <tr>
                                           <td>{{ $generador->tipo }}</td>
                                         
-                                          <td>{{ $generador->palabras_claves }}</td>
+                                          <td>{{ $generador->total_palabras_clave }}</td>
+                                          <td>{!! nl2br(e(str_replace(',', ",\n", $generador->palabras_claves))) !!}</td>
+
+                                         
                                           <td>
                                             @if($generador->estatus=='SI')
                                               <span class="bg-success-focus text-success-600 border border-success-main px-24 py-4 radius-4 fw-medium text-sm">Activo</span> 
