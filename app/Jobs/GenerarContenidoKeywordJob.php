@@ -124,7 +124,8 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                     themePlan: $themePlan,
                     noRepetirTitles: $noRepetirTitles,
                     noRepetirCorpus: $noRepetirCorpus,
-                    noRepetirHeadings: $noRepetirHeadings
+                    noRepetirHeadings: $noRepetirHeadings,
+                    usedTitles: $usedTitles // ✅ NUEVO
                 );
 
                 $values = $this->stringifyValues($values);
@@ -407,7 +408,8 @@ HTML
     array $themePlan,
     string $noRepetirTitles,
     string $noRepetirCorpus,
-    string $noRepetirHeadings
+    string $noRepetirHeadings,
+    array $usedTitles = []
 ): array {
     $allKeys = array_keys($tokensMeta);
 
@@ -418,16 +420,19 @@ HTML
         return $ra <=> $rb;
     });
 
-    $chunks = array_chunk($allKeys, 12);
+    // ✅ menos llamadas
+    $chunks = array_chunk($allKeys, 24);
     $values = [];
 
     $variation = "seed={$seed}|job=" . substr($this->jobUuid, 0, 8) . "|rid=" . (int)$this->registroId;
 
     foreach ($chunks as $chunkKeys) {
+        // esquema
         $skeleton = [];
         foreach ($chunkKeys as $k) $skeleton[$k] = "";
         $schemaJson = json_encode($skeleton, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
+        // keys por tipo
         $plainKeys = [];
         $editorKeys = [];
         foreach ($chunkKeys as $k) {
@@ -440,15 +445,17 @@ HTML
         $briefCTA   = $this->toStr($brief['cta'] ?? '');
         $briefAud   = $this->toStr($brief['audience'] ?? '');
 
+        // títulos ya creados en este mismo contenido (evita repetir)
         $alreadySectionTitles = [];
-        foreach ($values as $k => $v) {
-            if (preg_match('~^SECTION_\d+_TITLE$~', (string)$k)) {
-                $alreadySectionTitles[] = trim(strip_tags($this->toStr($v)));
+        foreach ($values as $kk => $vv) {
+            if (preg_match('~^SECTION_\d+_TITLE$~', (string)$kk)) {
+                $alreadySectionTitles[] = trim(strip_tags($this->toStr($vv)));
             }
         }
         $alreadySectionTitles = array_slice(array_filter($alreadySectionTitles), 0, 20);
         $alreadyStr = implode(' | ', $alreadySectionTitles);
 
+        // Plan (guía interna)
         $planLines = [];
         for ($i=1; $i<=26; $i++) $planLines[] = "SECTION_{$i}: " . ($themePlan[$i] ?? 'Tema');
         $planText = implode("\n", $planLines);
@@ -464,7 +471,7 @@ VARIATION (NO imprimir): {$variation}
 
 Rol:
 Eres un Redactor SEO experto en conversión. Escribes como una landing real: propuesta de valor + beneficios + confianza + pasos + objeciones + CTA.
-Debe funcionar para cualquier industria (restaurantes, agencias, servicios, ecommerce, marketing). No asumas "taxi" ni ningún sector fijo.
+Debe funcionar para cualquier industria. No asumas un sector fijo.
 
 Contexto:
 - Keyword principal: {$this->keyword}
@@ -491,19 +498,17 @@ NO REPETIR TEXTOS:
 YA USADOS (evita repetir estos títulos):
 {$alreadyStr}
 
-PALABRAS CLAVE (en vez de "enfoques"):
+PALABRAS CLAVE:
 - Usa la keyword principal como eje.
 - Deriva 4–8 variantes/LSI/long-tail/entidades relacionadas.
 - NO imprimas la lista; aplícala natural.
 - Si la keyword incluye ciudad/servicio ("X en Y"), úsalo. Si no, NO inventes ciudad.
 
-ESTILO (como landing):
+ESTILO:
 - Frases claras, sin relleno.
-- Beneficios concretos (no vagos).
-- Refuerza confianza sin inventar datos (evita "años de experiencia" si no está en keyword).
-
-- Escribe como guía editorial/landing humana: tono natural.
-- Introduce la ciudad (si está en keyword) de forma descriptiva 1 vez por sección H2.
+- Beneficios concretos.
+- Refuerza confianza sin inventar datos.
+- Tono editorial/landing humano.
 - Evita lenguaje de consultoría ("herramienta estratégica", "valor percibido", etc.).
 
 REGLAS ESTRICTAS:
@@ -512,21 +517,18 @@ REGLAS ESTRICTAS:
 - TODOS los valores deben ser STRING.
 - ❌ NO uses headings como “Introducción”, “Conclusión”, “¿Qué es...?”.
 - ❌ NO repitas headings del bloque NO REPETIR (HEADINGS).
-- ✅ Headings atractivos y comerciales (tipo: "Precio claro y opciones", "Cómo reservar en 1 minuto", "Lo que incluye", "Por qué elegirnos", etc.)
-- No repitas la keyword en todas las líneas.
-- No repitas estructuras del tipo “Descubre el placer…”, “El arte del…”, “¿Qué debes saber?” en demasiadas secciones.
-- PROHIBIDO imprimir o copiar el PLAN (no uses "SECTION_1:" ni "Enfoque:" ni "Tema:" ni frases del plan).
-- PROHIBIDO usar la palabra "Enfoque:" en headings o texto.
-- PROHIBIDO empezar párrafos con "Tratamos..." / "Aquí aterrizamos..." / "Convertimos..." / "Aplicamos..." (suena plantilla).
+- PROHIBIDO imprimir o copiar el PLAN (no uses "SECTION_1:" ni "Enfoque:" ni "Tema:").
+- PROHIBIDO usar la palabra "Enfoque:".
+- PROHIBIDO empezar párrafos con "Tratamos..." / "Aquí aterrizamos..." / "Convertimos..." / "Aplicamos...".
 - PROHIBIDO usar corchetes [] (nada de [CTA]).
-- PROHIBIDO listas con guiones "-" o viñetas (sin bullets). Todo en párrafos.
+- PROHIBIDO listas con guiones "-" o viñetas (sin bullets).
 - PROHIBIDO promesas tipo "medible", "garantizado", "desde el primer día" si no hay datos.
-
+- Máximo 1 <br> por valor (solo si aporta claridad).
 
 FORMATO:
 - SEO_TITLE (si existe): ≤ 60 caracteres, incluir keyword principal, enfoque comercial.
-- Headings (H2_*, H3_*): 6–14 palabras, comerciales, sin “Introducción/Conclusión/¿Qué es…?”
-- Párrafos (P_*): 60–140 palabras, 3–7 frases, naturales y con intención SEO. NO uses <p>. Puedes usar <strong> y <br>.
+- Headings: 6–14 palabras.
+- Párrafos: 60–140 palabras, 3–7 frases, naturales. NO uses <p>. Puedes usar <strong> y <br>.
 - Keys plain: solo texto plano.
 
 LISTA editor:
@@ -539,33 +541,93 @@ ESQUEMA:
 {$schemaJson}
 PROMPT;
 
-        $raw = $this->deepseekText($apiKey, $model, $prompt, maxTokens: 1800, temperature: 0.92, topP: 0.9, jsonMode: true);
+        $raw = $this->deepseekText(
+            $apiKey,
+            $model,
+            $prompt,
+            maxTokens: 1800,
+            temperature: 0.92,
+            topP: 0.9,
+            jsonMode: true
+        );
 
         $arr = $this->safeParseOrRepairForKeys($apiKey, $model, $raw, $chunkKeys, $brief, $variation);
+
+        // ✅ Primer pase: guarda lo bueno, detecta faltantes
+        $missing = [];
 
         foreach ($chunkKeys as $k) {
             $k = (string)$k;
             $meta = $tokensMeta[$k] ?? ['type' => 'plain', 'wrap_p' => false];
 
-            $val = $this->toStr($arr[$k] ?? '');
-            $val = $this->normalizeValueByTokenMeta($val, $meta);
+            $rawVal = $this->toStr($arr[$k] ?? '');
 
+            // si de entrada vino vacío -> candidate a regen batch
+            if (trim(strip_tags($rawVal)) === '') {
+                $missing[] = $k;
+                continue;
+            }
+
+            $val = $this->normalizeValueByTokenMeta($rawVal, $meta);
+
+            // si se vació por limpieza/ruido, NO regen (fallback directo)
             if ($this->isEmptyValue($val)) {
-                $val = $this->fallbackForToken($k, $meta, $seed, $themePlan);
+                $values[$k] = $this->fallbackForToken($k, $meta, $seed + 777, $themePlan, true);
+                continue;
             }
 
             $values[$k] = $val;
         }
+
+        // ✅ Segundo pase: si faltaron keys, 1 solo regen batch
+        if (!empty($missing)) {
+            $regen = $this->regenerateSpecificTokensViaIA(
+                apiKey: $apiKey,
+                model: $model,
+                keys: $missing,
+                tokensMeta: $tokensMeta,
+                brief: $brief,
+                seed: $seed + 555,
+                themePlan: $themePlan,
+                usedTitles: $usedTitles,
+                noRepetirTitles: $noRepetirTitles,
+                noRepetirCorpus: $noRepetirCorpus,
+                noRepetirHeadings: $noRepetirHeadings,
+                currentValues: $values
+            );
+
+            foreach ($missing as $k) {
+                $k = (string)$k;
+                $meta = $tokensMeta[$k] ?? ['type' => 'plain', 'wrap_p' => false];
+
+                $tmp = $this->toStr($regen[$k] ?? '');
+                $tmp = $this->normalizeValueByTokenMeta($tmp, $meta);
+
+                if ($this->isEmptyValue($tmp)) {
+                    $tmp = $this->fallbackForToken($k, $meta, $seed + 777, $themePlan, true);
+                }
+
+                $values[$k] = $tmp;
+            }
+        }
     }
 
+    // ✅ Anti-duplicados simples en párrafos (si dos SECTION_*_P salen idénticos)
     $seen = [];
     foreach ($values as $k => $v) {
         if (!preg_match('~^SECTION_(\d+)_P$~', (string)$k)) continue;
+
         $plain = mb_strtolower(trim(strip_tags($this->toStr($v))));
         if ($plain === '') continue;
 
         if (isset($seen[$plain])) {
-            $values[$k] = $this->fallbackForToken((string)$k, $tokensMeta[$k] ?? ['type'=>'editor','wrap_p'=>false], $seed + 77, $themePlan, true);
+            $values[$k] = $this->fallbackForToken(
+                (string)$k,
+                $tokensMeta[$k] ?? ['type'=>'editor','wrap_p'=>false],
+                $seed + 77,
+                $themePlan,
+                true
+            );
         } else {
             $seen[$plain] = true;
         }
@@ -826,68 +888,60 @@ PROMPT;
         return $s;
     }
 
-    private function normalizeEditorFragment(string $html): string
-    {
-        // 1) Permite SOLO <strong> y <br> (y elimina <p> si llega)
-        $clean = strip_tags((string)$html, '<strong><br><p>');
-        $clean = trim((string)$clean);
+   private function normalizeEditorFragment(string $html): string
+{
+    // Permite SOLO <strong> y <br> (toleramos <p> para poder quitarlo)
+    $clean = strip_tags((string)$html, '<strong><br><p>');
+    $clean = trim((string)$clean);
 
-        // Quita envolturas <p>...</p> si llegan
-        if (preg_match('~^\s*<p>\s*(.*?)\s*</p>\s*$~is', $clean, $m)) {
-            $clean = trim((string)($m[1] ?? ''));
-        }
-
-        // Normaliza <br />
-        $clean = str_replace(["<br />", "<br/>"], "<br>", (string)$clean);
-
-        // 2) Elimina basura típica que te está saliendo
-        $badPhrases = [
-            '[CTA]', '[cta]', 'CTA]', '[CTA',
-            'Enfoque:', 'Tema:', 'PLAN DE TEMAS', 'SECTION_', 'SECTION:',
-            'Tratamos Soporte y comunicación', 'Tratamos Para quién es ideal',
-            'Tratamos ', 'Aquí aterrizamos ', 'Convertimos ', 'Aplicamos ', 'Desarrollamos ',
-            'contenido escaneable, ordenado y fácil de adaptar a tu sitio en Elementor',
-            'fácil de adaptar a tu sitio en Elementor',
-        ];
-
-        foreach ($badPhrases as $bp) {
-            $clean = str_ireplace($bp, '', $clean);
-        }
-
-        // 3) Quita líneas tipo "SECTION_1: ..." o "SECTION_12: ..."
-        $clean = preg_replace('~(?mi)^\s*SECTION_\d+\s*:\s*.*$~u', '', (string)$clean);
-
-        // 4) Quita headings "Enfoque: ..." si llegaron en el valor
-        $clean = preg_replace('~(?mi)^\s*Enfoque\s*:\s*~u', '', (string)$clean);
-
-        // 5) Quita bullets estilo "- ..."
-        $clean = preg_replace('~(?m)^\s*-\s+~u', '', (string)$clean);
-        // Si venían en una misma línea con <br>- ...
-        $clean = preg_replace('~<br>\s*-\s+~u', '<br>', (string)$clean);
-
-        // 6) Suaviza claims “demasiado marketing” (opcional pero útil)
-        $clean = preg_replace('~\b(medible|garantizado|garantizada|desde el primer día|retorno a corto plazo)\b~iu', '', (string)$clean);
-
-        // 7) Arregla unión de tags: </strong>Texto => </strong> Texto
-        $clean = preg_replace('~</strong>\s*([A-Za-zÁÉÍÓÚÑÜáéíóúñü])~u', '</strong> $1', (string)$clean);
-        $clean = preg_replace('~<br>\s*([A-Za-zÁÉÍÓÚÑÜáéíóúñü¿¡])~u', '<br>$1', (string)$clean);
-
-        // 8) Normaliza espacios (sin romper <br>)
-        // Convierte espacios raros a normales
-        $clean = preg_replace('~[ \t]+~u', ' ', (string)$clean);
-        // Quita espacios alrededor de <br>
-        $clean = preg_replace('~\s*<br>\s*~u', '<br>', (string)$clean);
-        // Quita saltos excesivos
-        $clean = preg_replace("~\n{3,}~u", "\n\n", (string)$clean);
-
-        // 9) Limpieza final
-        $clean = trim((string)$clean);
-
-        // Si quedó vacío, devuelve algo mínimo (evita strings vacíos)
-        if ($clean === '') return 'Texto informativo listo para publicar.';
-
-        return $clean;
+    // Quita envoltura <p>...</p>
+    if (preg_match('~^\s*<p>\s*(.*?)\s*</p>\s*$~is', $clean, $m)) {
+        $clean = trim((string)($m[1] ?? ''));
     }
+
+    // Normaliza <br />
+    $clean = str_replace(["<br />", "<br/>"], "<br>", (string)$clean);
+
+    // Quita corchetes tipo [CTA]
+    $clean = str_ireplace(['[CTA]', '[cta]', '[Cta]'], '', (string)$clean);
+
+    // Quita líneas meta tipo "SECTION_1: ..."
+    $clean = preg_replace('~(?mi)^\s*SECTION_\d+\s*:\s*.*$~u', '', (string)$clean);
+
+    // Quita "Enfoque:" al inicio de línea
+    $clean = preg_replace('~(?mi)^\s*Enfoque\s*:\s*~u', '', (string)$clean);
+
+    // Quita SOLO la plantilla exacta “Tratamos ... Elementor”
+    $clean = preg_replace(
+        '~Tratamos\s+[^.]{0,140}\s+con\s+criterio:\s+contenido\s+escaneable,\s+ordenado\s+y\s+fácil\s+de\s+adaptar\s+a\s+tu\s+sitio\s+en\s+Elementor\.?~iu',
+        '',
+        (string)$clean
+    );
+
+    // Quita bullets "- ..." (sin tocar guiones internos)
+    $clean = preg_replace('~(?m)^\s*-\s+~u', '', (string)$clean);
+    $clean = preg_replace('~<br>\s*-\s+~u', '<br>', (string)$clean);
+
+    // Suaviza claims “demasiado marketing”
+    $clean = preg_replace(
+        '~\b(medible|garantizado|garantizada|desde el primer día|retorno a corto plazo)\b~iu',
+        '',
+        (string)$clean
+    );
+
+    // Arregla unión de tags: </strong>Texto => </strong> Texto
+    $clean = preg_replace('~</strong>\s*([A-Za-zÁÉÍÓÚÑÜáéíóúñü¿¡])~u', '</strong> $1', (string)$clean);
+
+    // Normaliza espacios (sin romper <br>)
+    $clean = preg_replace('~[ \t]+~u', ' ', (string)$clean);
+    $clean = preg_replace('~\s*<br>\s*~u', '<br>', (string)$clean);
+    $clean = preg_replace("~\n{3,}~u", "\n\n", (string)$clean);
+
+    // ✅ NO inventes texto aquí
+    return trim((string)$clean); // puede ser ''
+}
+
+
 
 
     private function isEmptyValue(string $v): bool
