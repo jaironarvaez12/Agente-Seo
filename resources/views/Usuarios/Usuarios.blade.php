@@ -26,24 +26,20 @@
 </div>
 
           <div class="card basic-data-table">
-           <div class="card-header text-end">
-               <div class="d-flex justify-content-end">
-                    <div style="width: auto;">
-                          <a href="{!! route('usuarios.create') !!}" class="btn btn-primary text-sm btn-sm px-12 py-12 radius-8 d-flex align-items-center gap-2"> 
-                            <iconify-icon icon="ic:baseline-plus" class="icon text-xl line-height-1"></iconify-icon>
-                            Nuevo
-                          </a>
-                          
-                    </div>
-                    <div style="width: auto;">
-                          <a href="{{ route('usuarios.dependientes.crear') }}"
-                            class="btn btn-primary d-flex align-items-center gap-2">
-                            <iconify-icon icon="ic:baseline-plus" class="icon text-lg"></iconify-icon>
-                            Crear Dependiente
-                          </a>
-                          
-                    </div>
-                </div>
+            <div class="card-header text-end">
+              <div class="d-flex justify-content-end align-items-center gap-10 flex-wrap">
+                  <a href="{!! route('usuarios.create') !!}"
+                    class="btn btn-primary text-sm btn-sm px-16 py-10 radius-8 d-flex align-items-center gap-2">
+                      <iconify-icon icon="ic:baseline-plus" class="icon text-lg line-height-1"></iconify-icon>
+                      Nuevo usuario
+                  </a>
+
+                  <a href="{{ route('usuarios.dependientes.crear') }}"
+                    class="btn btn-outline-primary text-sm btn-sm px-16 py-10 radius-8 d-flex align-items-center gap-2">
+                      <iconify-icon icon="ic:baseline-person-add" class="icon text-lg line-height-1"></iconify-icon>
+                      Crear dependiente
+                  </a>
+              </div>
             </div>
             <div class="card-body">
               <div class="table-responsive scroll-sm">
