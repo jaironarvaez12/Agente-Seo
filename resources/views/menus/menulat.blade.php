@@ -215,6 +215,36 @@
           </li>
         </ul>
       </li>
+      <li class="dropdown">
+        <a href="javascript:void(0)">
+          <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
+          <span>Backlinks</span>
+        </a>
+        <ul class="sidebar-submenu">
+          {{-- <li>
+            <a href="{{ route('usuarios.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Lista de Usuarios</a>
+          </li> --}}
+         
+         
+         
+        </ul>
+      </li>
+      <li class="dropdown">
+        <a href="javascript:void(0)">
+          <iconify-icon icon="flowbite:users-group-outline" class="menu-icon"></iconify-icon>
+          <span>Configuracion</span>
+        </a>
+        <ul class="sidebar-submenu">
+          <li>
+            <a href="{{ route('configuracionprompt') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Prompt Generador SEO</a>
+          </li>
+         
+         
+
+
+          
+        </ul>
+      </li>
 
        
  

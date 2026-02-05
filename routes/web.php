@@ -242,7 +242,9 @@ Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
 
     Route::get('dashboardseo', [App\Http\Controllers\DashboardController::class, 'DashboardSeo'])->name('dashboardseo');
 
-
+    //modificar prompt
+    Route::get('configuracionprompt', [App\Http\Controllers\PromptGlobalController::class, 'editar'])->name('configuracionprompt');
+    Route::post('guardarprompt', [App\Http\Controllers\PromptGlobalController::class, 'guardar'])->name('guardarprompt');
 
 
 

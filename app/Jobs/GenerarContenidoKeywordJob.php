@@ -10,7 +10,8 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Support\Str;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
-
+use App\Models\Ajuste_Ia;
+use Illuminate\Support\Facades\Cache;
 use App\Models\DominiosModel;
 use App\Models\Dominios_Contenido_DetallesModel;
 
@@ -37,7 +38,23 @@ class GenerarContenidoKeywordJob implements ShouldQueue
         $this->jobUuid = trim($this->jobUuid);
     }
 
-    
+    //obtener prompt
+    private function obtenerAjuste(string $clave, string $porDefecto = ''): string
+    {
+        return Cache::remember("ajuste:$clave", 300, function () use ($clave, $porDefecto) {
+            $valor = (string) optional(Ajuste_Ia::where('clave', $clave)->first())->valor;
+            $valor = trim($valor);
+            return $valor !== '' ? $valor : $porDefecto;
+        });
+    }
+    private function renderizarPrompt(string $plantilla, array $variables): string
+    {
+        $reemplazos = [];
+        foreach ($variables as $k => $v) {
+            $reemplazos['{{' . strtoupper($k) . '}}'] = (string) $v;
+        }
+        return strtr($plantilla, $reemplazos);
+    }
     
     public function handle(): void
     {
@@ -459,83 +476,36 @@ HTML
         $editorList = implode(', ', $editorKeys);
         $plainList  = implode(', ', $plainKeys);
 
-        $prompt = <<<PROMPT
-Devuelve SOLO JSON válido (sin markdown). RESPUESTA MINIFICADA.
-Idioma: ES.
+        $plantillaPrompt = $this->obtenerAjuste('deepseek_prompt_global', '');
 
-VARIATION (NO imprimir): {$variation}
+        if ($plantillaPrompt === '') {
+            throw new \RuntimeException('NO_RETRY: No hay prompt global configurado en ajustes (deepseek_prompt_global).');
+        }
 
-Rol:
-Eres un Redactor SEO experto en conversión. Escribes como una landing real: propuesta de valor + beneficios + confianza + pasos + objeciones + CTA.
-Debe funcionar para cualquier industria. No asumas un sector fijo.
+        $variables = [
+            'variation' => $variation,
+            'keyword' => $this->keyword,
+            'tipo' => $this->tipo,
 
-Contexto:
-- Keyword principal: {$this->keyword}
-- Tipo: {$this->tipo}
+            'brief_angle' => $briefAngle,
+            'brief_tone' => $briefTone,
+            'brief_audience' => $briefAud,
+            'brief_cta' => $briefCTA,
 
-BRIEF:
-- Ángulo: {$briefAngle}
-- Tono: {$briefTone}
-- Público: {$briefAud}
-- CTA: {$briefCTA}
+            'plan_text' => $planText,
 
-PLAN DE TEMAS (SOLO GUIA INTERNA - NO IMPRIMIR NI COPIAR):
-{$planText}
+            'no_repetir_headings' => $noRepetirHeadings,
+            'no_repetir_titles' => $noRepetirTitles,
+            'no_repetir_corpus' => $noRepetirCorpus,
+            'already_str' => $alreadyStr,
 
-NO REPETIR (HEADINGS existentes / analisis):
-{$noRepetirHeadings}
+            'editor_list' => $editorList,
+            'plain_list' => $plainList,
 
-NO REPETIR TÍTULOS:
-{$noRepetirTitles}
+            'schema_json' => $schemaJson,
+        ];
 
-NO REPETIR TEXTOS:
-{$noRepetirCorpus}
-
-YA USADOS (evita repetir estos títulos):
-{$alreadyStr}
-
-PALABRAS CLAVE:
-- Usa la keyword principal como eje.
-- Deriva 4–8 variantes/LSI/long-tail/entidades relacionadas.
-- NO imprimas la lista; aplícala natural.
-- Si la keyword incluye ciudad/servicio ("X en Y"), úsalo. Si no, NO inventes ciudad.
-
-ESTILO:
-- Frases claras, sin relleno.
-- Beneficios concretos.
-- Refuerza confianza sin inventar datos.
-- Tono editorial/landing humano.
-- Evita lenguaje de consultoría ("herramienta estratégica", "valor percibido", etc.).
-
-REGLAS ESTRICTAS:
-- Devuelve EXACTAMENTE las keys del ESQUEMA (no agregues ni quites).
-- PROHIBIDO valores vacíos: nada de "" ni null.
-- TODOS los valores deben ser STRING.
-- ❌ NO uses headings como “Introducción”, “Conclusión”, “¿Qué es...?”.
-- ❌ NO repitas headings del bloque NO REPETIR (HEADINGS).
-- PROHIBIDO imprimir o copiar el PLAN (no uses "SECTION_1:" ni "Enfoque:" ni "Tema:").
-- PROHIBIDO usar la palabra "Enfoque:".
-- PROHIBIDO empezar párrafos con "Tratamos..." / "Aquí aterrizamos..." / "Convertimos..." / "Aplicamos...".
-- PROHIBIDO usar corchetes [] (nada de [CTA]).
-- PROHIBIDO listas con guiones "-" o viñetas (sin bullets).
-- PROHIBIDO promesas tipo "medible", "garantizado", "desde el primer día" si no hay datos.
-- Máximo 1 <br> por valor (solo si aporta claridad).
-
-FORMATO:
-- SEO_TITLE (si existe): ≤ 60 caracteres, incluir keyword principal, enfoque comercial.
-- Headings: 6–14 palabras.
-- Párrafos: 60–140 palabras, 3–7 frases, naturales. NO uses <p>. Puedes usar <strong> y <br>.
-- Keys plain: solo texto plano.
-
-LISTA editor:
-{$editorList}
-
-LISTA plain:
-{$plainList}
-
-ESQUEMA:
-{$schemaJson}
-PROMPT;
+$prompt = $this->renderizarPrompt($plantillaPrompt, $variables);
 
         $raw = $this->deepseekText(
             $apiKey,
