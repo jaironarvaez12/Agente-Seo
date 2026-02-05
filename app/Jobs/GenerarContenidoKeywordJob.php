@@ -420,19 +420,16 @@ HTML
         return $ra <=> $rb;
     });
 
-    // ✅ menos llamadas
     $chunks = array_chunk($allKeys, 24);
     $values = [];
 
     $variation = "seed={$seed}|job=" . substr($this->jobUuid, 0, 8) . "|rid=" . (int)$this->registroId;
 
     foreach ($chunks as $chunkKeys) {
-        // esquema
         $skeleton = [];
         foreach ($chunkKeys as $k) $skeleton[$k] = "";
         $schemaJson = json_encode($skeleton, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
-        // keys por tipo
         $plainKeys = [];
         $editorKeys = [];
         foreach ($chunkKeys as $k) {
@@ -445,7 +442,6 @@ HTML
         $briefCTA   = $this->toStr($brief['cta'] ?? '');
         $briefAud   = $this->toStr($brief['audience'] ?? '');
 
-        // títulos ya creados en este mismo contenido (evita repetir)
         $alreadySectionTitles = [];
         foreach ($values as $kk => $vv) {
             if (preg_match('~^SECTION_\d+_TITLE$~', (string)$kk)) {
@@ -455,7 +451,7 @@ HTML
         $alreadySectionTitles = array_slice(array_filter($alreadySectionTitles), 0, 20);
         $alreadyStr = implode(' | ', $alreadySectionTitles);
 
-        // Plan (guía interna)
+        // Plan guía interna
         $planLines = [];
         for ($i=1; $i<=26; $i++) $planLines[] = "SECTION_{$i}: " . ($themePlan[$i] ?? 'Tema');
         $planText = implode("\n", $planLines);
@@ -553,7 +549,7 @@ PROMPT;
 
         $arr = $this->safeParseOrRepairForKeys($apiKey, $model, $raw, $chunkKeys, $brief, $variation);
 
-        // ✅ Primer pase: guarda lo bueno, detecta faltantes
+        // Primer pase: guarda lo bueno, detecta faltantes REALES
         $missing = [];
 
         foreach ($chunkKeys as $k) {
@@ -562,7 +558,7 @@ PROMPT;
 
             $rawVal = $this->toStr($arr[$k] ?? '');
 
-            // si de entrada vino vacío -> candidate a regen batch
+            // Si vino vacío desde origen => regen batch
             if (trim(strip_tags($rawVal)) === '') {
                 $missing[] = $k;
                 continue;
@@ -570,7 +566,7 @@ PROMPT;
 
             $val = $this->normalizeValueByTokenMeta($rawVal, $meta);
 
-            // si se vació por limpieza/ruido, NO regen (fallback directo)
+            // Si se vació por limpieza/ruido => fallback directo (NO regen)
             if ($this->isEmptyValue($val)) {
                 $values[$k] = $this->fallbackForToken($k, $meta, $seed + 777, $themePlan, true);
                 continue;
@@ -579,7 +575,7 @@ PROMPT;
             $values[$k] = $val;
         }
 
-        // ✅ Segundo pase: si faltaron keys, 1 solo regen batch
+        // Segundo pase: regen batch 1 sola llamada
         if (!empty($missing)) {
             $regen = $this->regenerateSpecificTokensViaIA(
                 apiKey: $apiKey,
@@ -612,7 +608,7 @@ PROMPT;
         }
     }
 
-    // ✅ Anti-duplicados simples en párrafos (si dos SECTION_*_P salen idénticos)
+    // Anti-duplicados simples en párrafos
     $seen = [];
     foreach ($values as $k => $v) {
         if (!preg_match('~^SECTION_(\d+)_P$~', (string)$k)) continue;
@@ -894,7 +890,7 @@ PROMPT;
     $clean = strip_tags((string)$html, '<strong><br><p>');
     $clean = trim((string)$clean);
 
-    // Quita envoltura <p>...</p>
+    // Quita envoltura <p>...</p> si llega
     if (preg_match('~^\s*<p>\s*(.*?)\s*</p>\s*$~is', $clean, $m)) {
         $clean = trim((string)($m[1] ?? ''));
     }
@@ -903,7 +899,7 @@ PROMPT;
     $clean = str_replace(["<br />", "<br/>"], "<br>", (string)$clean);
 
     // Quita corchetes tipo [CTA]
-    $clean = str_ireplace(['[CTA]', '[cta]', '[Cta]'], '', (string)$clean);
+    $clean = str_ireplace(['[CTA]', '[cta]', '[Cta]', '[CTA', 'CTA]'], '', (string)$clean);
 
     // Quita líneas meta tipo "SECTION_1: ..."
     $clean = preg_replace('~(?mi)^\s*SECTION_\d+\s*:\s*.*$~u', '', (string)$clean);
@@ -911,9 +907,12 @@ PROMPT;
     // Quita "Enfoque:" al inicio de línea
     $clean = preg_replace('~(?mi)^\s*Enfoque\s*:\s*~u', '', (string)$clean);
 
+    // Quita "Tema:" al inicio de línea
+    $clean = preg_replace('~(?mi)^\s*Tema\s*:\s*~u', '', (string)$clean);
+
     // Quita SOLO la plantilla exacta “Tratamos ... Elementor”
     $clean = preg_replace(
-        '~Tratamos\s+[^.]{0,140}\s+con\s+criterio:\s+contenido\s+escaneable,\s+ordenado\s+y\s+fácil\s+de\s+adaptar\s+a\s+tu\s+sitio\s+en\s+Elementor\.?~iu',
+        '~Tratamos\s+[^.]{0,180}\s+con\s+criterio:\s+contenido\s+escaneable,\s+ordenado\s+y\s+fácil\s+de\s+adaptar\s+a\s+tu\s+sitio\s+en\s+Elementor\.?~iu',
         '',
         (string)$clean
     );
@@ -932,12 +931,25 @@ PROMPT;
     // Arregla unión de tags: </strong>Texto => </strong> Texto
     $clean = preg_replace('~</strong>\s*([A-Za-zÁÉÍÓÚÑÜáéíóúñü¿¡])~u', '</strong> $1', (string)$clean);
 
+    // Limita exceso de <br> (máximo 2)
+    if (substr_count($clean, '<br>') > 2) {
+        $parts = explode('<br>', $clean);
+        $keep  = array_slice($parts, 0, 3);   // deja 2 <br> (3 partes)
+        $rest  = array_slice($parts, 3);
+        $clean = implode('<br>', $keep) . (count($rest) ? ' ' . implode('. ', array_map('trim', $rest)) : '');
+    }
+
     // Normaliza espacios (sin romper <br>)
     $clean = preg_replace('~[ \t]+~u', ' ', (string)$clean);
     $clean = preg_replace('~\s*<br>\s*~u', '<br>', (string)$clean);
     $clean = preg_replace("~\n{3,}~u", "\n\n", (string)$clean);
 
-    // ✅ NO inventes texto aquí
+    // Quita residuos tipo "(10)" o "(bloque 10)" al final
+    $clean = preg_replace('~\s*\((?:bloque\s*)?\d+\)\s*$~iu', '', (string)$clean);
+
+    // Quita esta frase si llegara (por si acaso)
+    $clean = preg_replace('~Texto\s+preparado\s+para\s+publicar.*$~iu', '', (string)$clean);
+
     return trim((string)$clean); // puede ser ''
 }
 
@@ -949,120 +961,147 @@ PROMPT;
         return trim(strip_tags((string)$v)) === '';
     }
 
-    private function fallbackForToken(string $tok, array $meta, int $seed, array $themePlan, bool $forceUnique = false): string
-    {
-        $type  = $meta['type'] ?? 'plain';
-        $wrapP = (bool)($meta['wrap_p'] ?? false);
+    /**
+ * Fallback NO-PLANTILLA.
+ * - NO usa themePlan textual como heading
+ * - NO agrega "(10)" ni "(bloque 10)"
+ * - NO devuelve "Texto preparado para publicar..."
+ * - Devuelve SIEMPRE algo (si el modelo falló o quedó vacío tras normalizar)
+ */
+private function fallbackForToken(
+    string $tok,
+    array $meta,
+    int $seed,
+    array $themePlan,
+    bool $forceUnique = false
+): string {
+    $type  = $meta['type'] ?? 'plain';
+    $wrapP = (bool)($meta['wrap_p'] ?? false);
 
-        $kw = $this->shortKw();
-        $pick = function(array $arr) use ($seed, $tok) {
-            $i = $this->stableSeedInt($seed . '|' . $tok) % max(1, count($arr));
-            return $arr[$i] ?? $arr[0];
-        };
+    $kw = $this->shortKw();
 
-        // ✅ específicos para evitar genéricos
-        if ($tok === 'CLIENTS_LABEL') {
-            return $pick(["Marcas", "Equipos", "Negocios", "Proyectos", "Agencias", "Empresas"]);
-        }
-        if ($tok === 'KIT_H1') {
-            return $pick([
-                "Bloques listos para publicar",
-                "Secciones con intención",
-                "Estructura lista para tu web",
-                "Copy y bloques bien ordenados",
-                "Contenido preparado para convertir",
-            ]);
-        }
-        if ($tok === 'PRICE_H2') {
-            return $pick([
-                "Entrega clara y sin sorpresas",
-                "Alcance definido y ordenado",
-                "Plan de trabajo con entregables",
-                "Implementación simple y medible",
-                "Listo para publicar en Elementor",
-            ]);
-        }
-        if ($tok === 'TESTIMONIOS_TITLE') {
-            return $pick([
-                "Lo que más valoran",
-                "Resultados que se suelen notar",
-                "Comentarios habituales",
-                "Por qué funciona el enfoque",
-                "Lo que cambia al aplicarlo",
-            ]);
-        }
+    // helper determinista
+    $pick = function(array $arr) use ($seed, $tok) {
+        $i = $this->stableSeedInt($seed . '|' . $tok) % max(1, count($arr));
+        return $arr[$i] ?? $arr[0];
+    };
 
-        if (preg_match('~^SECTION_(\d+)_TITLE$~', $tok, $m)) {
-            $i = (int)($m[1] ?? 1);
-            $tema = $themePlan[$i] ?? "Tema {$i}";
-           $variants = [
-            "{$kw}: {$tema}",
-            "Descubre cómo influye {$tema} en {$kw}",
-            "{$kw} y {$tema}: lo que realmente importa",
-            "Claves de {$tema} para mejorar {$kw}",
-            ];
-            $t = $pick($variants);
-            return $forceUnique ? ($t . " ({$i})") : $t;
-        }
-
-        if (preg_match('~^SECTION_(\d+)_P$~', $tok, $m)) {
-            $i = (int)($m[1] ?? 1);
-            $tema = $themePlan[$i] ?? "Tema {$i}";
-
-            $variants = [
-            "{$kw} no es solo una cuestión de elegir y ya. Cuando piensas en {$tema}, empiezas a notar detalles que cambian la experiencia completa: el ambiente, la confianza, el ritmo y lo cómodo que te sientes con el proceso. La clave está en adaptar la decisión a tu situación real, sin prisas y sin promesas vacías. Así el resultado se siente natural y satisfactorio.",
-            "Si estás valorando {$kw}, {$tema} puede marcar la diferencia entre algo “correcto” y una experiencia realmente agradable. No se trata de complicarlo, sino de entender qué te aporta, qué límites quieres poner y qué esperas sentir durante el servicio. Con esa claridad, todo fluye mejor y disfrutas más del momento.",
-            "A veces lo que falta en {$kw} no es información, sino contexto. {$tema} te ayuda a elegir con calma, evitar errores típicos y preparar el escenario para que la experiencia sea cómoda desde el principio. Cuando cuidas esos detalles, el cuerpo se relaja antes y la sensación final cambia por completo.",
-            ];
-
-            $p = $pick($variants);
-            if ($forceUnique) $p .= " (bloque {$i})";
-
-            if ($wrapP) return trim(strip_tags($p));
-            return ($type === 'editor') ? $p : trim(strip_tags($p));
-        }
-
-        if (str_starts_with($tok, 'BTN_')) {
-            return match ($tok) {
-                'BTN_PRESUPUESTO' => $pick(["Solicitar presupuesto","Pedir propuesta","Ver opciones"]),
-                'BTN_REUNION'     => $pick(["Agendar llamada","Reservar llamada","Hablar ahora"]),
-                'BTN_KITDIGITAL'  => $pick(["Ver información","Consultar","Empezar"]),
-                default           => $pick(["Ver opciones","Continuar"]),
-            };
-        }
-
-        if ($tok === 'HERO_H1') return $pick([
-            "{$kw} con estrategia y claridad",
-            "Estructura y copy para {$kw}",
-            "{$kw}: mensaje, secciones y CTA",
-        ]);
-
-        if ($tok === 'HERO_KICKER') return $pick([
-            "Para equipos que buscan claridad",
-            "Estructura lista para publicar",
-            "Mensaje directo, sin ruido",
-            "Pensado para leads y acción",
-        ]);
-
-        if ($tok === 'FAQ_TITLE') return "Preguntas frecuentes";
-
-        if ($tok === 'FINAL_CTA') {
-            $txt = $pick([
-                "¿Quieres publicarlo y avanzar? <strong>Te guiamos con el siguiente paso.</strong>",
-                "¿Listo para mejorar el mensaje? <strong>Hagamos una propuesta clara.</strong>",
-                "¿Buscas una entrega sin vueltas? <strong>Agenda y lo estructuramos.</strong>",
-            ]);
-            return ($type === 'editor' && !$wrapP) ? $txt : trim(strip_tags($txt));
-        }
-
-        // ✅ genérico pero no repetitivo ni “Contenido útil…”
-        $generic = $pick([
-            "Bloque redactado con foco en claridad y estructura.",
-            "Texto preparado para publicar y ajustar sin relleno.",
-            "Sección lista para adaptar con mensaje directo.",
-        ]);
-        return ($type === 'editor' && !$wrapP) ? $generic : trim(strip_tags($generic));
+    // Etiquetas cortas
+    if ($tok === 'CLIENTS_LABEL') {
+        return $pick(["Marcas", "Negocios", "Equipos", "Proyectos", "Empresas"]);
     }
+
+    if ($tok === 'FAQ_TITLE') return "Preguntas frecuentes";
+
+    if ($tok === 'FAQ_INTRO') {
+        return "Resolvemos dudas habituales sobre {$kw} para que puedas decidir con claridad.";
+    }
+
+    // ✅ TITULOS DE SECCION: sin themePlan, sin sufijos
+    if (preg_match('~^SECTION_(\d+)_TITLE$~', $tok, $m)) {
+        $i = (int)($m[1] ?? 1);
+
+        $opts = [
+            "Cómo aplicar {$kw} paso a paso",
+            "Qué debes considerar antes de contratar {$kw}",
+            "Lo que incluye {$kw} y cómo se entrega",
+            "Opciones y modalidades para {$kw} según tu caso",
+            "Errores comunes al elegir {$kw} y cómo evitarlos",
+            "Cómo reservar {$kw} sin complicaciones",
+            "Por qué elegir {$kw} con un enfoque profesional",
+            "Precio y opciones: qué influye y cómo decidir",
+            "Calidad y seguridad: qué revisar antes de empezar",
+            "Soporte y ajustes: cómo se acompaña el proceso",
+            "Casos habituales donde {$kw} funciona mejor",
+            "Cómo mantener resultados con {$kw} a largo plazo",
+        ];
+
+        $t = $this->pickVariant($opts, "sec_title|rid=".(int)$this->registroId."|seed=".$seed."|i=".$i."|kw=".$kw);
+        return $t;
+    }
+
+    // ✅ PARRAFOS DE SECCION: naturales, sin plantillas, sin "(bloque i)"
+    if (preg_match('~^SECTION_(\d+)_P$~', $tok, $m)) {
+        $i = (int)($m[1] ?? 1);
+
+        $opts = [
+            "Para que {$kw} funcione bien, lo primero es entender el objetivo: qué quieres que sienta el cliente y qué comportamiento buscas (más tiempo, mejor percepción o una experiencia más coherente). Con eso claro, se elige una opción que encaje con tu espacio y se ajusta la intensidad para que sea agradable, no invasiva.",
+            "La clave de {$kw} está en el ajuste: no es solo elegir algo bonito, sino definir dónde se percibe, con qué intensidad y en qué momentos. Un buen trabajo evita saturación, mantiene consistencia y deja una sensación natural que acompaña la experiencia sin distraer.",
+            "Si estás comparando opciones de {$kw}, céntrate en tres puntos: calidad, control del sistema y soporte para ajustes. Con eso evitas decisiones por impulso y consigues un resultado estable, cómodo y acorde a tu negocio.",
+            "En {$kw} la diferencia suele estar en los detalles: una buena elección considera el tipo de público, la actividad del local y la ventilación. Así se consigue una experiencia agradable, coherente con tu marca y fácil de mantener en el tiempo.",
+            "Un enfoque profesional en {$kw} prioriza comodidad y control: instalación discreta, configuración rápida y posibilidad de ajustes cuando cambian temporadas o el flujo de clientes. El objetivo es que se note para bien, sin complicarte la operación diaria.",
+        ];
+
+        $p = $this->pickVariant($opts, "sec_p|rid=".(int)$this->registroId."|seed=".$seed."|i=".$i."|kw=".$kw);
+
+        if ($wrapP) return trim(strip_tags($p));
+        return ($type === 'editor') ? $p : trim(strip_tags($p));
+    }
+
+    // ✅ FAQ Q/A
+    if (preg_match('~^FAQ_\d+_Q$~', $tok)) {
+        $opts = [
+            "¿Cuánto tarda en notarse el efecto?",
+            "¿Se puede ajustar la intensidad después?",
+            "¿Cómo se elige la opción ideal para mi espacio?",
+            "¿Qué incluye el servicio y el soporte?",
+            "¿Cómo se instala sin interrumpir la actividad?",
+        ];
+        return $this->pickVariant($opts, "faq_q|rid=".(int)$this->registroId."|seed=".$seed."|tok=".$tok."|kw=".$kw);
+    }
+
+    if (preg_match('~^FAQ_\d+_A$~', $tok)) {
+        $opts = [
+            "Depende del espacio y del objetivo, pero normalmente se nota desde los primeros días con el ajuste correcto. Lo importante es probar intensidad y zonas para que resulte agradable y coherente con la experiencia.",
+            "Sí. Ajustar intensidad o distribución es parte del proceso. Si cambia la temporada o el flujo de clientes, se puede retocar para mantener una sensación estable y cómoda.",
+            "Se evalúa el tipo de espacio, ventilación, público y el efecto buscado. Con eso se define una propuesta que encaje sin saturar y que sea fácil de mantener.",
+            "Incluye definición de objetivos, selección de opción, configuración del sistema y soporte para ajustes. La idea es que quede implementado sin fricción y con seguimiento.",
+            "Se coordina una instalación discreta y rápida, idealmente fuera de horas pico. Se deja configurado y se revisa que se perciba donde corresponde.",
+        ];
+        $a = $this->pickVariant($opts, "faq_a|rid=".(int)$this->registroId."|seed=".$seed."|tok=".$tok."|kw=".$kw);
+        return ($type === 'editor' && !$wrapP) ? $a : trim(strip_tags($a));
+    }
+
+    // Botones / CTA
+    if (str_starts_with($tok, 'BTN_')) {
+        return match ($tok) {
+            'BTN_PRESUPUESTO' => $pick(["Solicitar presupuesto","Pedir propuesta","Ver opciones"]),
+            'BTN_REUNION'     => $pick(["Agendar llamada","Reservar llamada","Hablar ahora"]),
+            default           => $pick(["Ver opciones","Continuar"]),
+        };
+    }
+
+    if ($tok === 'HERO_H1') return $pick([
+        "{$kw} con un enfoque claro y natural",
+        "Haz que {$kw} se sienta coherente y memorable",
+        "{$kw} pensado para una experiencia más cuidada",
+    ]);
+
+    if ($tok === 'HERO_KICKER') return $pick([
+        "Claro, natural y fácil de implementar",
+        "Una experiencia que se nota sin exagerar",
+        "Pensado para mejorar la percepción sin ruido",
+    ]);
+
+    if ($tok === 'FINAL_CTA') {
+        $txt = $pick([
+            "¿Quieres empezar con buen criterio? <strong>Cuéntanos tu caso y te orientamos.</strong>",
+            "¿Listo para dar el siguiente paso? <strong>Te compartimos una propuesta clara.</strong>",
+            "¿Te interesa implementarlo sin complicarte? <strong>Agenda y lo vemos.</strong>",
+        ]);
+        return ($type === 'editor' && !$wrapP) ? $txt : trim(strip_tags($txt));
+    }
+
+    // ✅ Genérico final (sin “Texto preparado…”)
+    $generic = $this->pickVariant([
+        "Texto listo para ajustar y publicar con claridad.",
+        "Contenido preparado para encajar con tu página sin ruido.",
+        "Sección redactada con enfoque natural y fácil de leer.",
+    ], "gen|rid=".(int)$this->registroId."|seed=".$seed."|tok=".$tok);
+
+    return ($type === 'editor' && !$wrapP) ? $generic : trim(strip_tags($generic));
+}
+
 
     // ========================= FIX: palabras pegadas (AgenciasAgencias) =========================
     private function fixJoinedWordsInValues(array $values, array $tokensMeta): array
