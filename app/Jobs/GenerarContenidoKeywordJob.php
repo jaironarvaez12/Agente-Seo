@@ -172,9 +172,40 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             if ($replacedCount < 1) throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Template: {$tplPath}");
             if (!empty($remainingTokens)) throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remainingTokens, 0, 120)));
             
-                $titleRaw = trim(strip_tags($this->toStr($finalValues['SEO_TITLE'] ?? $finalValues['HERO_H1'] ?? $this->keyword)));
-                $title = $this->sanitizeTitle($titleRaw, 'SEO_TITLE');
-            if ($title === '') $title = (string) $this->keyword;
+              // 1) Candidatos (en orden). Si no hay SEO_TITLE/H1, usa el primer H2 (SECTION_1_TITLE)
+               $seo  = trim(strip_tags($this->toStr($finalValues['SEO_TITLE'] ?? '')));
+                $h1   = trim(strip_tags($this->toStr($finalValues['HERO_H1'] ?? '')));
+                $h2_1 = trim(strip_tags($this->toStr($finalValues['SECTION_1_TITLE'] ?? '')));
+
+                $kwPlain = trim((string)$this->keyword);
+
+                // Elegimos candidato y además guardamos "de dónde vino"
+                $source = 'KW';
+                $titleCandidate = $kwPlain;
+
+                if ($seo !== '') { $titleCandidate = $seo; $source = 'SEO'; }
+                elseif ($h1 !== '') { $titleCandidate = $h1; $source = 'H1'; }
+                elseif ($h2_1 !== '') { $titleCandidate = $h2_1; $source = 'H2'; }
+
+                // Si quedó igual a keyword y hay H2, usa H2
+                if ($kwPlain !== '' && mb_strtolower(trim($titleCandidate)) === mb_strtolower($kwPlain) && $h2_1 !== '') {
+                    $titleCandidate = $h2_1;
+                    $source = 'H2';
+                }
+
+                // Limpieza SUAVE (sin fallback genérico)
+                $title = trim(preg_replace('~\s+~u', ' ', strip_tags($titleCandidate)));
+
+                // ✅ SOLO recorta si viene de SEO_TITLE
+                if ($source === 'SEO') {
+                    $title = $this->smartTruncateTitle($title, 60);
+                }
+
+                // Si por algo queda vacío, usa H2 completo (sin recorte)
+                if ($title === '' && $h2_1 !== '') $title = trim(preg_replace('~\s+~u', ' ', $h2_1));
+                if ($title === '') $title = $kwPlain;
+
+
 
             $slugBase = Str::slug($title ?: $this->keyword);
             $slug = $slugBase . '-' . (int) $registro->id_dominio_contenido_detalle;
@@ -246,130 +277,58 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 [
                     'title' => '{{SEO_TITLE}}',
                 ],
-                [
-                    'editor' => <<<HTML
-<!-- Título SEO (≤ 60 caracteres): {{SEO_TITLE}} -->
+                 [
+                'editor' => <<<HTML
+<h2>{{SECTION_1_TITLE}}</h2>
+{{SECTION_1_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-12">
-      <h1>{{HERO_H1}}</h1>
-      <p>{{INTRO_P}}</p>
-    </div>
-  </div>
-</div>
+<h2>{{SECTION_4_TITLE}}</h2>
+{{SECTION_4_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-12">
-      <h2>{{SECTION_1_TITLE}}</h2>
-      <p>{{SECTION_1_P}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_2_TITLE}}</h3>
+{{SECTION_2_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-6">
-      <h3>{{SECTION_2_TITLE}}</h3>
-      <p>{{SECTION_2_P}}</p>
-    </div>
-    <div class="col-md-6">
-      <h3>{{SECTION_3_TITLE}}</h3>
-      <p>{{SECTION_3_P}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_3_TITLE}}</h3>
+{{SECTION_3_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-12">
-      <h2>{{SECTION_4_TITLE}}</h2>
-      <p>{{SECTION_4_P}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_5_TITLE}}</h3>
+{{SECTION_5_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-4">
-      <h3>{{SECTION_5_TITLE}}</h3>
-      <p>{{SECTION_5_P}}</p>
-    </div>
-    <div class="col-md-4">
-      <h3>{{SECTION_6_TITLE}}</h3>
-      <p>{{SECTION_6_P}}</p>
-    </div>
-    <div class="col-md-4">
-      <h3>{{SECTION_7_TITLE}}</h3>
-      <p>{{SECTION_7_P}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_6_TITLE}}</h3>
+{{SECTION_6_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-12">
-      <h2>{{SECTION_8_TITLE}}</h2>
-      <p>{{SECTION_8_P}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_7_TITLE}}</h3>
+{{SECTION_7_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-4">
-      <h3>{{SECTION_9_TITLE}}</h3>
-      <p>{{SECTION_9_P}}</p>
-    </div>
-    <div class="col-md-4">
-      <h3>{{SECTION_10_TITLE}}</h3>
-      <p>{{SECTION_10_P}}</p>
-    </div>
-    <div class="col-md-4">
-      <h3>{{SECTION_11_TITLE}}</h3>
-      <p>{{SECTION_11_P}}</p>
-    </div>
-  </div>
-</div>
+<h2>{{SECTION_8_TITLE}}</h2>
+{{SECTION_8_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-12">
-      <h2>{{FAQ_TITLE}}</h2>
-      <p>{{FAQ_INTRO}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_9_TITLE}}</h3>
+{{SECTION_9_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-4">
-      <h3>{{FAQ_1_Q}}</h3>
-      <p>{{FAQ_1_A}}</p>
-    </div>
-    <div class="col-md-4">
-      <h3>{{FAQ_2_Q}}</h3>
-      <p>{{FAQ_2_A}}</p>
-    </div>
-    <div class="col-md-4">
-      <h3>{{FAQ_3_Q}}</h3>
-      <p>{{FAQ_3_A}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_10_TITLE}}</h3>
+{{SECTION_10_P}}
 
-<div class="container">
-  <div class="row">
-    <div class="col-md-12">
-      <h2>{{SECTION_12_TITLE}}</h2>
-      <p>{{SECTION_12_P}}</p>
-      <p>{{FINAL_CTA}}</p>
-    </div>
-  </div>
-</div>
+<h3>{{SECTION_11_TITLE}}</h3>
+{{SECTION_11_P}}
+
+<h2>{{FAQ_TITLE}}</h2>
+{{FAQ_INTRO}}
+
+<h3>{{FAQ_1_Q}}</h3>
+{{FAQ_1_A}}
+
+<h3>{{FAQ_2_Q}}</h3>
+{{FAQ_2_A}}
+
+<h3>{{FAQ_3_Q}}</h3>
+{{FAQ_3_A}}
+
+<h2>{{SECTION_12_TITLE}}</h2>
+{{SECTION_12_P}}
+{{FINAL_CTA}}
 HTML
-                ],
+            ],
             ],
         ];
 
@@ -553,10 +512,13 @@ REGLAS ESTRICTAS:
 - ❌ NO repitas headings del bloque NO REPETIR (HEADINGS).
 - ✅ Headings atractivos y comerciales (tipo: "Precio claro y opciones", "Cómo reservar en 1 minuto", "Lo que incluye", "Por qué elegirnos", etc.)
 - No repitas la keyword en todas las líneas.
+- No repitas estructuras del tipo “Descubre el placer…”, “El arte del…”, “¿Qué debes saber?” en demasiadas secciones.
+
 
 FORMATO:
 - SEO_TITLE (si existe): ≤ 60 caracteres, incluir keyword principal, enfoque comercial.
-- Keys editor: 1–3 frases. Permite SOLO <strong> y <br>. NO uses <p>.
+- Headings (H2_*, H3_*): 6–14 palabras, comerciales, sin “Introducción/Conclusión/¿Qué es…?”
+- Párrafos (P_*): 60–140 palabras, 3–7 frases, naturales y con intención SEO. NO uses <p>. Puedes usar <strong> y <br>.
 - Keys plain: solo texto plano.
 
 LISTA editor:
@@ -1055,47 +1017,68 @@ PROMPT;
     string $noRepetirCorpus,
     string $noRepetirHeadings
 ): array {
+    // Tokens críticos base
     $critical = ['KIT_H1','PRICE_H2','CLIENTS_LABEL','TESTIMONIOS_TITLE','SEO_TITLE','HERO_H1'];
     for ($i=1; $i<=12; $i++) $critical[] = "CONT_{$i}";
 
+    // Solo los que existen en la plantilla
     $want = [];
     foreach ($critical as $k) if (isset($tokensMeta[$k])) $want[] = $k;
     if (empty($want)) return $values;
 
-    $kwLower = mb_strtolower($this->shortKw());
+    $kwLower = mb_strtolower(trim($this->shortKw()));
+
+    // Reglas: estos NO pueden ser exactamente la keyword
+    $mustNotBeKeywordOnly = ['SEO_TITLE','HERO_H1','KIT_H1','PRICE_H2','TESTIMONIOS_TITLE'];
+
     $needs = [];
 
     foreach ($want as $k) {
         $v = trim($this->toStr($values[$k] ?? ''));
         $plain = mb_strtolower(trim(strip_tags($v)));
 
+        // vacío
         if ($plain === '') { $needs[] = $k; continue; }
 
-        if (str_contains($plain, 'contenido útil') ||
+        // frases genéricas / plantilleras
+        if (
+            str_contains($plain, 'contenido útil') ||
             str_contains($plain, 'bloque preparado') ||
             str_contains($plain, 'texto ordenado') ||
-            str_contains($plain, 'perfil no recomendado')) {
+            str_contains($plain, 'perfil no recomendado')
+        ) {
             $needs[] = $k; continue;
         }
 
+        // NO puede ser igual a keyword (incluye SEO_TITLE y HERO_H1)
+        if ($kwLower !== '' && in_array($k, $mustNotBeKeywordOnly, true) && $plain === $kwLower) {
+            $needs[] = $k; continue;
+        }
+
+        // Longitudes mínimas por tipo
+        if ($k === 'SEO_TITLE' && mb_strlen($plain) < 25) { $needs[] = $k; continue; }
+        if ($k === 'HERO_H1'   && mb_strlen($plain) < 20) { $needs[] = $k; continue; }
         if (in_array($k, ['KIT_H1','PRICE_H2','TESTIMONIOS_TITLE'], true) && mb_strlen($plain) < 10) {
             $needs[] = $k; continue;
         }
 
+        // CLIENTS_LABEL debe ser corto y sin puntuación
         if ($k === 'CLIENTS_LABEL') {
             if (str_contains($plain, '.') || count(preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY)) > 3) {
                 $needs[] = $k; continue;
             }
         }
 
-        if (in_array($k, ['KIT_H1','PRICE_H2','TESTIMONIOS_TITLE'], true) && $plain === $kwLower) {
-            $needs[] = $k; continue;
+        // CONT_* demasiado corto o sin "sustancia" (heurística simple)
+        if (preg_match('~^CONT_\d+$~', $k)) {
+            if (mb_strlen($plain) < 35) { $needs[] = $k; continue; }
         }
     }
 
     $needs = array_values(array_unique($needs));
     if (empty($needs)) return $values;
 
+    // Regeneración IA SOLO de los tokens que fallaron
     $regenerated = $this->regenerateSpecificTokensViaIA(
         apiKey: $apiKey,
         model: $model,
@@ -1111,19 +1094,43 @@ PROMPT;
         currentValues: $values
     );
 
+    // Normaliza y aplica fallbacks si algo vuelve vacío
     foreach ($regenerated as $k => $v) {
         $k = (string)$k;
         $meta = $tokensMeta[$k] ?? ['type'=>'plain','wrap_p'=>false];
+
         $val = $this->normalizeValueByTokenMeta($this->toStr($v), $meta);
 
         if ($this->isEmptyValue($val)) {
             $val = $this->fallbackForToken($k, $meta, $seed + 101, $themePlan, true);
         }
+
         $values[$k] = $val;
+    }
+
+    // 🔒 Blindaje final: si SEO_TITLE sigue quedando igual a keyword, fuerza fallback
+    if (isset($tokensMeta['SEO_TITLE'])) {
+        $seo = trim(strip_tags($this->toStr($values['SEO_TITLE'] ?? '')));
+        $seoLc = mb_strtolower($seo);
+        if ($seo === '' || ($kwLower !== '' && $seoLc === $kwLower) || mb_strlen($seo) < 25) {
+            $meta = $tokensMeta['SEO_TITLE'] ?? ['type'=>'plain','wrap_p'=>false];
+            $values['SEO_TITLE'] = $this->fallbackForToken('SEO_TITLE', $meta, $seed + 777, $themePlan, true);
+        }
+    }
+
+    // 🔒 Blindaje final: si HERO_H1 queda igual a keyword, fuerza fallback
+    if (isset($tokensMeta['HERO_H1'])) {
+        $h1 = trim(strip_tags($this->toStr($values['HERO_H1'] ?? '')));
+        $h1Lc = mb_strtolower($h1);
+        if ($h1 === '' || ($kwLower !== '' && $h1Lc === $kwLower) || mb_strlen($h1) < 20) {
+            $meta = $tokensMeta['HERO_H1'] ?? ['type'=>'plain','wrap_p'=>false];
+            $values['HERO_H1'] = $this->fallbackForToken('HERO_H1', $meta, $seed + 999, $themePlan, true);
+        }
     }
 
     return $values;
 }
+
 
 
 
@@ -1858,9 +1865,25 @@ private function sanitizeTitle(string $title, string $field = 'SEO_TITLE'): stri
     // Si quedó muy corto o termina raro, fuerza fallback
     $lc = mb_strtolower($t);
     if ($t === '' || mb_strlen($t) < 25 || preg_match('~[:\-]\s*$~u', $t) || preg_match('~\b(y|con|para|de|en)\s*$~iu', $t)) {
-        $kw = $this->shortKw();
-        $t = $this->smartTruncateTitle("{$kw}: Precio fijo y reserva rápida", 60);
-    }
+    $kw = $this->shortKw();
+
+    $opts = [
+        "{$kw}: Reserva rápida y atención discreta",
+        "{$kw}: Experiencia exclusiva y trato profesional",
+        "{$kw}: Sensualidad y relajación en un solo paso",
+        "{$kw}: Servicio a domicilio con total privacidad",
+        "{$kw}: Opciones claras y atención inmediata",
+        "{$kw}: Discreción, confort y experiencia premium",
+        "{$kw}: Elige tu sesión y confirma en minutos",
+        "{$kw}: Una experiencia sensorial sin complicaciones",
+    ];
+
+    $salt = "sanitize|rid=".(int)$this->registroId."|kw=".$kw."|raw=".$t;
+    $t = $this->pickVariant($opts, $salt);
+
+    if ($field === 'SEO_TITLE') $t = $this->smartTruncateTitle($t, 60);
+}
+
 
 
     // Si quedó raro/vacío, cae a algo seguro
