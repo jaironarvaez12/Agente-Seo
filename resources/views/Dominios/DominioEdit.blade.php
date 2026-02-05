@@ -39,8 +39,8 @@
                                         Nombre del Dominio<span class="text-danger-600">*</span>
                                     </label>
                                     <input type="text" class="form-control radius-8" id="nombre" name="nombre"
-                                           value="{{ old('name', $dominio->nombre ?? '') }}"
-                                           placeholder="Ej: IdeiWeb.com" readonly>
+                                           value="{{ old('nombre', $dominio->nombre ?? '') }}"
+                                           placeholder="Ej: IdeiWeb.com" >
                                 </div>
 
                                 <div class="mb-20">

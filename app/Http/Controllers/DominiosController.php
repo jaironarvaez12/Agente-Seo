@@ -433,8 +433,9 @@ class DominiosController extends Controller
     /**
      * Update the specified resource in storage.
      */
-   public function update(Request $request, string $id_dominio)
+    public function update(Request $request, string $id_dominio)
     {
+       
          if ($request->hasFile('imagen'))
         {   
             $PosseDocumentos = 'SI';
@@ -483,7 +484,7 @@ class DominiosController extends Controller
 
             // (Opcional pero recomendado)
             $request->validate([
-                'usuario' => ['nullable','string','max:255'],
+                'nombre' => ['required','string','max:255'],
                 'password' => ['nullable','string','max:255'],
                 'elementor_template_path' => ['nullable','string','max:255'],
                   'solo_html' => ['nullable','boolean'], // ✅ nuevo
@@ -494,7 +495,7 @@ class DominiosController extends Controller
 
 
             $dominios->fill([
-               
+                'nombre' =>$request['nombre'],
                 'elementor_template_path' => $request->input('elementor_template_path'), // 👈 NUEVO
             ]);
 
