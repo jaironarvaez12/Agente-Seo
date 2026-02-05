@@ -476,7 +476,7 @@ BRIEF:
 - Público: {$briefAud}
 - CTA: {$briefCTA}
 
-PLAN DE TEMAS (OBLIGATORIO):
+PLAN DE TEMAS (SOLO GUIA INTERNA - NO IMPRIMIR NI COPIAR):
 {$planText}
 
 NO REPETIR (HEADINGS existentes / analisis):
@@ -501,8 +501,10 @@ ESTILO (como landing):
 - Frases claras, sin relleno.
 - Beneficios concretos (no vagos).
 - Refuerza confianza sin inventar datos (evita "años de experiencia" si no está en keyword).
-- Responde objeciones típicas: precio, tiempo, calidad, confianza, disponibilidad (sin prometer de más).
-- CTA natural y repetido con variaciones (sin spam).
+
+- Escribe como guía editorial/landing humana: tono natural.
+- Introduce la ciudad (si está en keyword) de forma descriptiva 1 vez por sección H2.
+- Evita lenguaje de consultoría ("herramienta estratégica", "valor percibido", etc.).
 
 REGLAS ESTRICTAS:
 - Devuelve EXACTAMENTE las keys del ESQUEMA (no agregues ni quites).
@@ -513,6 +515,12 @@ REGLAS ESTRICTAS:
 - ✅ Headings atractivos y comerciales (tipo: "Precio claro y opciones", "Cómo reservar en 1 minuto", "Lo que incluye", "Por qué elegirnos", etc.)
 - No repitas la keyword en todas las líneas.
 - No repitas estructuras del tipo “Descubre el placer…”, “El arte del…”, “¿Qué debes saber?” en demasiadas secciones.
+- PROHIBIDO imprimir o copiar el PLAN (no uses "SECTION_1:" ni "Enfoque:" ni "Tema:" ni frases del plan).
+- PROHIBIDO usar la palabra "Enfoque:" en headings o texto.
+- PROHIBIDO empezar párrafos con "Tratamos..." / "Aquí aterrizamos..." / "Convertimos..." / "Aplicamos..." (suena plantilla).
+- PROHIBIDO usar corchetes [] (nada de [CTA]).
+- PROHIBIDO listas con guiones "-" o viñetas (sin bullets). Todo en párrafos.
+- PROHIBIDO promesas tipo "medible", "garantizado", "desde el primer día" si no hay datos.
 
 
 FORMATO:
@@ -820,17 +828,67 @@ PROMPT;
 
     private function normalizeEditorFragment(string $html): string
     {
+        // 1) Permite SOLO <strong> y <br> (y elimina <p> si llega)
         $clean = strip_tags((string)$html, '<strong><br><p>');
         $clean = trim((string)$clean);
 
+        // Quita envolturas <p>...</p> si llegan
         if (preg_match('~^\s*<p>\s*(.*?)\s*</p>\s*$~is', $clean, $m)) {
             $clean = trim((string)($m[1] ?? ''));
         }
 
-        $clean = preg_replace('~\s+~u', ' ', (string)$clean);
+        // Normaliza <br />
         $clean = str_replace(["<br />", "<br/>"], "<br>", (string)$clean);
-        return trim((string)$clean);
+
+        // 2) Elimina basura típica que te está saliendo
+        $badPhrases = [
+            '[CTA]', '[cta]', 'CTA]', '[CTA',
+            'Enfoque:', 'Tema:', 'PLAN DE TEMAS', 'SECTION_', 'SECTION:',
+            'Tratamos Soporte y comunicación', 'Tratamos Para quién es ideal',
+            'Tratamos ', 'Aquí aterrizamos ', 'Convertimos ', 'Aplicamos ', 'Desarrollamos ',
+            'contenido escaneable, ordenado y fácil de adaptar a tu sitio en Elementor',
+            'fácil de adaptar a tu sitio en Elementor',
+        ];
+
+        foreach ($badPhrases as $bp) {
+            $clean = str_ireplace($bp, '', $clean);
+        }
+
+        // 3) Quita líneas tipo "SECTION_1: ..." o "SECTION_12: ..."
+        $clean = preg_replace('~(?mi)^\s*SECTION_\d+\s*:\s*.*$~u', '', (string)$clean);
+
+        // 4) Quita headings "Enfoque: ..." si llegaron en el valor
+        $clean = preg_replace('~(?mi)^\s*Enfoque\s*:\s*~u', '', (string)$clean);
+
+        // 5) Quita bullets estilo "- ..."
+        $clean = preg_replace('~(?m)^\s*-\s+~u', '', (string)$clean);
+        // Si venían en una misma línea con <br>- ...
+        $clean = preg_replace('~<br>\s*-\s+~u', '<br>', (string)$clean);
+
+        // 6) Suaviza claims “demasiado marketing” (opcional pero útil)
+        $clean = preg_replace('~\b(medible|garantizado|garantizada|desde el primer día|retorno a corto plazo)\b~iu', '', (string)$clean);
+
+        // 7) Arregla unión de tags: </strong>Texto => </strong> Texto
+        $clean = preg_replace('~</strong>\s*([A-Za-zÁÉÍÓÚÑÜáéíóúñü])~u', '</strong> $1', (string)$clean);
+        $clean = preg_replace('~<br>\s*([A-Za-zÁÉÍÓÚÑÜáéíóúñü¿¡])~u', '<br>$1', (string)$clean);
+
+        // 8) Normaliza espacios (sin romper <br>)
+        // Convierte espacios raros a normales
+        $clean = preg_replace('~[ \t]+~u', ' ', (string)$clean);
+        // Quita espacios alrededor de <br>
+        $clean = preg_replace('~\s*<br>\s*~u', '<br>', (string)$clean);
+        // Quita saltos excesivos
+        $clean = preg_replace("~\n{3,}~u", "\n\n", (string)$clean);
+
+        // 9) Limpieza final
+        $clean = trim((string)$clean);
+
+        // Si quedó vacío, devuelve algo mínimo (evita strings vacíos)
+        if ($clean === '') return 'Texto informativo listo para publicar.';
+
+        return $clean;
     }
+
 
     private function isEmptyValue(string $v): bool
     {
@@ -883,11 +941,11 @@ PROMPT;
         if (preg_match('~^SECTION_(\d+)_TITLE$~', $tok, $m)) {
             $i = (int)($m[1] ?? 1);
             $tema = $themePlan[$i] ?? "Tema {$i}";
-            $variants = [
-                "Enfoque: {$tema}",
-                "{$tema} en la práctica",
-                "Cómo aplicamos: {$tema}",
-                "Puntos clave de: {$tema}",
+           $variants = [
+            "{$kw}: {$tema}",
+            "Descubre cómo influye {$tema} en {$kw}",
+            "{$kw} y {$tema}: lo que realmente importa",
+            "Claves de {$tema} para mejorar {$kw}",
             ];
             $t = $pick($variants);
             return $forceUnique ? ($t . " ({$i})") : $t;
@@ -898,11 +956,9 @@ PROMPT;
             $tema = $themePlan[$i] ?? "Tema {$i}";
 
             $variants = [
-                "Aquí aterrizamos {$tema} para {$kw}: pasos claros, decisiones simples y texto listo para publicar sin relleno.",
-                "Desarrollamos {$tema} con enfoque práctico: qué hacer, qué evitar y cómo dejarlo consistente con tu oferta.",
-                "Aplicamos {$tema} pensando en intención y claridad: estructura, mensajes y siguiente paso sin prometer de más.",
-                "Convertimos {$tema} en bloques accionables: frases concretas, jerarquía y CTA coherente para avanzar.",
-                "Tratamos {$tema} con criterio: contenido escaneable, ordenado y fácil de adaptar a tu sitio en Elementor.",
+            "{$kw} no es solo una cuestión de elegir y ya. Cuando piensas en {$tema}, empiezas a notar detalles que cambian la experiencia completa: el ambiente, la confianza, el ritmo y lo cómodo que te sientes con el proceso. La clave está en adaptar la decisión a tu situación real, sin prisas y sin promesas vacías. Así el resultado se siente natural y satisfactorio.",
+            "Si estás valorando {$kw}, {$tema} puede marcar la diferencia entre algo “correcto” y una experiencia realmente agradable. No se trata de complicarlo, sino de entender qué te aporta, qué límites quieres poner y qué esperas sentir durante el servicio. Con esa claridad, todo fluye mejor y disfrutas más del momento.",
+            "A veces lo que falta en {$kw} no es información, sino contexto. {$tema} te ayuda a elegir con calma, evitar errores típicos y preparar el escenario para que la experiencia sea cómoda desde el principio. Cuando cuidas esos detalles, el cuerpo se relaja antes y la sensación final cambia por completo.",
             ];
 
             $p = $pick($variants);
