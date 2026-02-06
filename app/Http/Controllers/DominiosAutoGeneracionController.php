@@ -19,11 +19,9 @@ class DominiosAutoGeneracionController extends Controller
 
         $dominio = DominiosModel::where('id_dominio', (int)$idDominio)->firstOrFail();
         $this->validarPermisoDominio($usuario, $dominio);
-          $reglasWp = WpReglaProgramacion::where('id_dominio', (int)$dominio->id_dominio)
-      ->orderByDesc('id')
-      ->get();
+         
 
-        return view('Dominios.auto_generacion', compact('dominio','reglasWp'));
+        return view('Dominios.auto_generacion', compact('dominio'));
     }
 
     public function actualizar(Request $request, int $idDominio)
