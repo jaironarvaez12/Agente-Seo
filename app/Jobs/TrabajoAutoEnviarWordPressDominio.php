@@ -27,26 +27,24 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
         }
 
         // ✅ Cantidad por corrida (ej: 3)
-        $limit = max(1, (int)($dominio->wp_tareas_por_ejecucion ?? 3));
+       $limit = max(1, (int)($dominio->wp_tareas_por_ejecucion ?? 3));
 
-        // ✅ Buscar contenidos "generado" PENDIENTES DE WP (ajusta esto a tu tabla real)
-        // TODO: cambia 'contenidos', 'estatus', 'wp_estado' según tu esquema
-        $contenidos = DB::table('contenidos')
-            ->where('id_dominio', $this->idDominio)
-            ->where('estatus', 'generado')
-            ->where(function ($q) {
-                $q->whereNull('wp_estado')->orWhere('wp_estado', 'pendiente');
-            })
-            ->orderBy('id', 'asc')
-            ->limit($limit)
-            ->get();
+$contenidos = DB::table('dominios_contenido_detalles')
+    ->where('id_dominio', $this->idDominio)
+    ->where('estatus', 'generado') // ✅ ajusta si tu "listo" se llama distinto
+    ->where(function ($q) {
+        // pendientes de WP:
+        $q->whereNull('wp_post_id')->orWhere('wp_post_id', 0);
+    })
+    ->orderBy('id_dominio_contenido_detalle', 'asc')
+    ->limit($limit)
+    ->get();
 
-        // Si no hay contenido, solo recalcula próxima ejecución y salir
-        if ($contenidos->isEmpty()) {
-            $dominio->wp_siguiente_ejecucion = $this->calcularProximaEjecucionWp($dominio);
-            $dominio->save();
-            return;
-        }
+if ($contenidos->isEmpty()) {
+    $dominio->wp_siguiente_ejecucion = $this->calcularProximaEjecucionWp($dominio);
+    $dominio->save();
+    return;
+}
 
         // ✅ Publicar o Programar
         if ($dominio->wp_auto_modo === 'publicar') {
@@ -54,8 +52,13 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
                 // TODO: enviar a WP publish
                 // $this->wpService->publicar($dominio, $c);
 
-                DB::table('contenidos')->where('id', $c->id)->update([
-                    'wp_estado' => 'enviado',
+               DB::table('dominios_contenido_detalles')
+                ->where('id_dominio_contenido_detalle', $c->id_dominio_contenido_detalle)
+                ->update([
+                    'wp_post_id' => $wpPostId ?? 1, // ✅ pon aquí el ID real que te devuelva WP
+                    'wp_url'     => $wpUrl ?? null,
+                    'wp_link'    => $wpLink ?? null,
+                    'estatus'    => 'publicado', // opcional, si manejas estado final
                     'updated_at' => now(),
                 ]);
             }
@@ -69,11 +72,14 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
                 // TODO: enviar a WP future con $fecha
                 // $this->wpService->programar($dominio, $c, $fecha);
 
-                DB::table('contenidos')->where('id', $c->id)->update([
-                    'wp_estado' => 'programado',
-                    'wp_programado_para' => $fecha,
-                    'updated_at' => now(),
+                DB::table('dominios_contenido_detalles')
+                ->where('id_dominio_contenido_detalle', $c->id_dominio_contenido_detalle)
+                ->update([
+                    'scheduled_at' => $fecha,
+                    'estatus'      => 'programado', // opcional si lo usas
+                    'updated_at'   => now(),
                 ]);
+
             }
 
             // opcional: mantener tu campo existente
