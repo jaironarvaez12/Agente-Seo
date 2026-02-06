@@ -173,7 +173,7 @@ class DominiosAutoGeneracionController extends Controller
 
 
 
- public function wpEjecutarAhora(int $idDominio)
+public function wpEjecutarAhora(int $idDominio)
 {
     $usuario = auth()->user();
     if (!$usuario) return back()->withError('Debes iniciar sesión.');
@@ -185,18 +185,16 @@ class DominiosAutoGeneracionController extends Controller
         return back()->withError('Activa "Enviar automáticamente a WordPress" primero.');
     }
 
-    // ✅ fuerza “ya toca”
-    if (property_exists($dominio, 'wp_siguiente_ejecucion')) {
-        $dominio->wp_siguiente_ejecucion = now()->subSeconds(5);
-        $dominio->save();
-    }
+    // ✅ fuerza "ya toca"
+    $dominio->wp_siguiente_ejecucion = now()->subSeconds(5);
+    $dominio->save();
 
     TrabajoAutoEnviarWordPressDominio::dispatch((int)$dominio->id_dominio, true)
-        ->onConnection('database')   // OJO: que coincida con tu worker
         ->onQueue('default');
 
     return back()->withSuccess('Listo. Se forzó el envío a WordPress ahora.');
 }
+
 
 /** ✅ Calcula la próxima ejecución WP según regla */
 private function calcularProximaEjecucionWp($dominio, Carbon $now): Carbon
