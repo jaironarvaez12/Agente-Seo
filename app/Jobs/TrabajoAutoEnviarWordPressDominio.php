@@ -43,10 +43,10 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
             return;
         }
 
-        // ✅ Secret para HMAC (AJUSTA el nombre si tu columna se llama distinto)
-        $secret = (string)($dom->wp_secret ?? '');
+        // ✅ MISMA LÓGICA que tu publicar/programar manual
+        $secret = (string) env('WP_WEBHOOK_SECRET');
         if ($secret === '') {
-            Log::error("WP JOB: falta wp_secret dominio={$this->idDominio}");
+            Log::error("WP JOB: WP_WEBHOOK_SECRET no configurado en .env dominio={$this->idDominio}");
             $dom->wp_siguiente_ejecucion = $this->calcularProximaEjecucionWp($dom, now());
             $dom->save();
             return;
@@ -58,13 +58,13 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
             ->where('id_dominio', $this->idDominio)
             ->where('estatus', 'generado')
             ->where(function ($w) {
-                // pendientes: aún no tienen wp_id
+                // pendientes de WP: no tienen wp_id aún
                 $w->whereNull('wp_id')->orWhere('wp_id', 0);
             })
             ->orderBy('id_dominio_contenido_detalle', 'asc')
             ->limit($limit);
 
-        // Si vamos a programar, evita reprogramar los que ya tienen scheduled_at
+        // si modo=programar, evita reprogramar los que ya tienen scheduled_at
         if (($dom->wp_auto_modo ?? 'manual') === 'programar') {
             $q->whereNull('scheduled_at');
         }
@@ -81,37 +81,74 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
         }
 
         foreach ($items as $it) {
-            try {
-                $resp = $this->upsertToWp($dom, $it, $secret);
+            Log::info("WP JOB ITEM id_detalle={$it->id_dominio_contenido_detalle} title=" . substr((string)($it->title ?? ''), 0, 40));
 
-                // ✅ SOLO si ok=true aplicamos cambios
-                $wpId = (int)($resp['wp_id'] ?? 0);
-                $link = (string)($resp['link'] ?? '');
-                $wpStatus = (string)($resp['status'] ?? '');
+            // Marcar en proceso
+            DB::table('dominios_contenido_detalles')
+                ->where('id_dominio_contenido_detalle', $it->id_dominio_contenido_detalle)
+                ->update([
+                    'estatus'    => 'en_proceso',
+                    'error'      => null,
+                    'updated_at' => now(),
+                ]);
+
+            try {
+                $modo = (string)($dom->wp_auto_modo ?? 'manual');
+                if (!in_array($modo, ['publicar', 'programar'], true)) {
+                    throw new \RuntimeException("Modo WP inválido: {$modo}");
+                }
+
+                // si programar: calcula schedule_at según tu política
+                $dtUtc = null;
+                $scheduleAtUtcWp = null;
+
+                if ($modo === 'programar') {
+                    // puedes ajustar esta política:
+                    // - si quieres usar regla cada N días, etc. es PARA EJECUCIÓN del job,
+                    //   pero el schedule de WP lo seguimos como antes: ahora+10min y escalonado.
+                    $scheduleLocal = now()->addMinutes(10);
+
+                    $dtUtc = $scheduleLocal->copy()->setTimezone('UTC');
+
+                    // ✅ WP SAFE: "Y-m-d H:i:s" (igual que tu programar manual)
+                    $scheduleAtUtcWp = $dtUtc->format('Y-m-d H:i:s');
+                }
+
+                $json = $this->lwsUpsert(
+                    dom: $dom,
+                    it: $it,
+                    secret: $secret,
+                    modo: $modo,
+                    scheduleAtUtcWp: $scheduleAtUtcWp
+                );
+
+                // ✅ OK: aplica exactamente tu lógica
+                $wpStatus = (string)($json['status'] ?? '');
 
                 $update = [
-                    'wp_id'      => $wpId > 0 ? $wpId : null,
-                    'wp_link'    => $link !== '' ? $link : null,
+                    'wp_id'      => ((int)($json['wp_id'] ?? 0) ?: ($it->wp_id ?? null)),
+                    'wp_link'    => (string)($json['link'] ?? ''),
                     'error'      => null,
                     'updated_at' => now(),
                 ];
 
-                // ✅ Estatus EXACTO como tu lógica original
                 if ($wpStatus === 'future') {
                     $update['estatus'] = 'programado';
 
-                    // scheduled_gmt si viene, si no usar lo calculado local
-                    if (!empty($resp['scheduled_gmt'])) {
-                        $update['scheduled_at'] = Carbon::parse($resp['scheduled_gmt'], 'UTC')
+                    if (!empty($json['scheduled_gmt'])) {
+                        $update['scheduled_at'] = Carbon::parse($json['scheduled_gmt'], 'UTC')
                             ->setTimezone(config('app.timezone'));
                     } else {
-                        // fallback: si enviamos schedule_at, ya lo tenemos calculado en upsertToWp()
-                        $update['scheduled_at'] = $this->lastScheduleAtLocal ?? null;
+                        // fallback: el schedule calculado
+                        $update['scheduled_at'] = $dtUtc
+                            ? $dtUtc->copy()->setTimezone(config('app.timezone'))
+                            : null;
                     }
                 } elseif ($wpStatus === 'publish') {
                     $update['estatus'] = 'publicado';
                     $update['scheduled_at'] = null;
                 } else {
+                    // WP devolvió ok, pero status raro => lo dejamos en generado
                     $update['estatus'] = 'generado';
                     $update['scheduled_at'] = null;
                 }
@@ -120,7 +157,7 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
                     ->where('id_dominio_contenido_detalle', $it->id_dominio_contenido_detalle)
                     ->update($update);
 
-                Log::info("WP OK id_detalle={$it->id_dominio_contenido_detalle} wp_id={$wpId} status={$wpStatus}");
+                Log::info("WP OK id_detalle={$it->id_dominio_contenido_detalle} wp_id=" . ($update['wp_id'] ?? 0) . " status={$wpStatus}");
 
             } catch (\Throwable $e) {
                 DB::table('dominios_contenido_detalles')
@@ -141,36 +178,99 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
         Log::info("WP JOB END dominio={$this->idDominio} next={$dom->wp_siguiente_ejecucion}");
     }
 
-    // =========================================================
-    // ✅ TU LÓGICA DE UPSERT (REST + fallback + HMAC)
-    // =========================================================
-
-    private ?Carbon $lastScheduleAtLocal = null;
-
-    private function upsertToWp($dom, $it, string $secret): array
+    /**
+     * ✅ Misma lógica de tu publicar/programar manual:
+     * - construye payload
+     * - firma HMAC
+     * - POST /wp-json/lws/v1/upsert y fallback admin-post
+     * - valida ok + json
+     */
+    private function lwsUpsert($dom, $it, string $secret, string $modo, ?string $scheduleAtUtcWp): array
     {
-        $wpBase      = rtrim((string) $dom->url, '/');
+        $wpBase      = rtrim((string)$dom->url, '/');
         $urlRest     = $wpBase . '/wp-json/lws/v1/upsert';
         $urlFallback = $wpBase . '/wp-admin/admin-post.php?action=lws_upsert';
 
-        $tipoNorm = strtolower(trim((string) $it->tipo));
+        $tipoNorm = strtolower(trim((string)$it->tipo));
         $type = ($tipoNorm === 'page') ? 'page' : 'post';
 
         if (empty($it->contenido_html)) {
-            throw new \RuntimeException('contenido_html está vacío (no hay nada que publicar/programar).');
+            throw new \RuntimeException('contenido_html está vacío (no hay nada que enviar).');
         }
 
-        $templatePath = trim((string) ($dom->elementor_template_path ?? ''));
+        $templatePath = trim((string)($dom->elementor_template_path ?? ''));
         $useElementor = ($templatePath !== '');
 
         $canvas = ($type === 'page') ? 'elementor_canvas' : '';
 
-        $contentToSend = (string) $it->contenido_html;
+        $contentToSend = $this->normalizarContenidoParaWp(
+            contenidoHtml: (string)$it->contenido_html,
+            title: (string)($it->title ?: ($it->keyword ?: '')),
+            useElementor: $useElementor
+        );
 
-        // Si NO usamos Elementor, asegúrate de enviar HTML (no JSON)
+        $payload = [
+            'type'    => $type,
+            'wp_id'   => $it->wp_id ?: null,
+            'title'   => $it->title ?: ($it->keyword ?: 'Sin título'),
+            'content' => $contentToSend,
+
+            'builder' => $useElementor ? 'elementor' : 'html',
+
+            'wp_page_template' => $useElementor ? $canvas : '',
+            'template'         => $useElementor ? $canvas : '',
+        ];
+
+        if ($modo === 'programar') {
+            $payload['status'] = 'future';
+            $payload['schedule_at'] = $scheduleAtUtcWp; // ✅ WP SAFE: "Y-m-d H:i:s"
+        } else {
+            $payload['status'] = 'publish';
+        }
+
+        $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($body === false) {
+            throw new \RuntimeException('No se pudo serializar payload JSON');
+        }
+
+        $ts  = time();
+        $sig = hash_hmac('sha256', $ts . '.' . $body, $secret);
+
+        $headers = [
+            'Content-Type' => 'application/json',
+            'X-Timestamp'  => (string)$ts,
+            'X-Signature'  => $sig,
+        ];
+
+        $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlRest, ['body' => $body]);
+
+        // fallback si REST no existe / bloqueado
+        if (in_array($resp->status(), [404, 405], true)) {
+            $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlFallback, ['body' => $body]);
+        }
+
+        $json = $resp->json();
+
+        if (!$resp->ok() || !is_array($json) || empty($json['ok'])) {
+            $msg = is_array($json) ? ($json['message'] ?? 'Error desconocido') : ('HTTP ' . $resp->status());
+            throw new \RuntimeException($msg);
+        }
+
+        return $json;
+    }
+
+    /**
+     * ✅ Copia la “higiene” de tu manual:
+     * - si no usa Elementor y parece JSON, intenta extraer HTML
+     * - asegura que sea HTML
+     */
+    private function normalizarContenidoParaWp(string $contenidoHtml, string $title, bool $useElementor): string
+    {
+        $contentToSend = $contenidoHtml;
+
         if (!$useElementor) {
-            $contentToSendTrim = ltrim($contentToSend);
-            $looksLikeJson = ($contentToSendTrim !== '' && in_array($contentToSendTrim[0], ['{', '['], true));
+            $trim = ltrim($contentToSend);
+            $looksLikeJson = ($trim !== '' && in_array($trim[0], ['{', '['], true));
 
             if ($looksLikeJson) {
                 $decoded = json_decode($contentToSend, true);
@@ -200,7 +300,7 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
                     if (is_string($candidate) && trim($candidate) !== '') {
                         $contentToSend = $candidate;
                     } else {
-                        $contentToSend = '<div>' . e($it->title ?: ($it->keyword ?: '')) . '</div>';
+                        $contentToSend = '<div>' . e($title) . '</div>';
                     }
                 }
             }
@@ -210,79 +310,11 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
             }
         }
 
-        // status según modo del dominio
-        $modo = (string)($dom->wp_auto_modo ?? 'manual');
-        if (!in_array($modo, ['publicar', 'programar'], true)) {
-            throw new \RuntimeException("Modo WP inválido: {$modo}");
-        }
-
-        $scheduleAtUtcWp = null;
-        $dtUtc = null;
-
-        if ($modo === 'programar') {
-            // si no viene scheduled_at, programamos "ahora +10" o respetamos tu lógica externa
-            $local = now()->addMinutes(10);
-
-            // Guardamos por si WP no devuelve scheduled_gmt
-            $this->lastScheduleAtLocal = $local->copy();
-
-            $dtUtc = $local->copy()->setTimezone('UTC');
-
-            // WP-safe: Y-m-d\TH:i:s (sin offset)
-            $scheduleAtUtcWp = $dtUtc->format('Y-m-d\TH:i:s');
-        }
-
-        $payload = [
-            'type'    => $type,
-            'wp_id'   => $it->wp_id ?: null,
-            'title'   => $it->title ?: ($it->keyword ?: 'Sin título'),
-            'content' => $contentToSend,
-
-            'builder' => $useElementor ? 'elementor' : 'html',
-
-            'wp_page_template' => $useElementor ? $canvas : '',
-            'template'         => $useElementor ? $canvas : '',
-        ];
-
-        if ($modo === 'programar') {
-            $payload['status'] = 'future';
-            $payload['schedule_at'] = $scheduleAtUtcWp;
-        } else {
-            $payload['status'] = 'publish';
-        }
-
-        $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        if ($body === false) {
-            throw new \RuntimeException('No se pudo serializar payload JSON');
-        }
-
-        $ts  = time();
-        $sig = hash_hmac('sha256', $ts . '.' . $body, $secret);
-
-        $headers = [
-            'Content-Type' => 'application/json',
-            'X-Timestamp'  => (string) $ts,
-            'X-Signature'  => $sig,
-        ];
-
-        $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlRest, ['body' => $body]);
-
-        if (in_array($resp->status(), [404, 405], true)) {
-            $resp = Http::timeout(25)->withHeaders($headers)->send('POST', $urlFallback, ['body' => $body]);
-        }
-
-        $json = $resp->json();
-
-        if (!$resp->ok() || !is_array($json) || empty($json['ok'])) {
-            $msg = is_array($json) ? ($json['message'] ?? 'Error desconocido') : ('HTTP ' . $resp->status());
-            throw new \RuntimeException('No se pudo upsert en WP: ' . $msg);
-        }
-
-        return $json;
+        return $contentToSend;
     }
 
     // =========================================================
-    // Próxima ejecución WP (reglas)
+    // Próxima ejecución WP (reglas) - igual que antes
     // =========================================================
     private function calcularProximaEjecucionWp($dominio, Carbon $now): Carbon
     {
