@@ -15,8 +15,10 @@ class WpAutoRun extends Command
     {
         $q = DominiosModel::query()
             ->where('wp_auto_activo', 1)
-            ->whereNotNull('wp_siguiente_ejecucion')
-            ->where('wp_siguiente_ejecucion', '<=', now());
+            ->where(function($w){
+                $w->whereNull('wp_siguiente_ejecucion')
+                ->orWhere('wp_siguiente_ejecucion', '<=', now());
+            });
 
         if ($this->option('dominio')) {
             $q->where('id_dominio', (int)$this->option('dominio'));
@@ -27,7 +29,13 @@ class WpAutoRun extends Command
 
         $forzar = (bool)$this->option('forzar');
 
-        foreach ($dominios as $d) {
+       foreach ($dominios as $d) {
+            // si está null y no es manual, inicializa
+            if (empty($d->wp_siguiente_ejecucion) && ($d->wp_regla_tipo ?? 'manual') !== 'manual') {
+                $d->wp_siguiente_ejecucion = now()->subSeconds(5);
+                $d->save();
+            }
+
             TrabajoAutoEnviarWordPressDominio::dispatch((int)$d->id_dominio, $forzar)
                 ->onConnection('database')
                 ->onQueue('default');

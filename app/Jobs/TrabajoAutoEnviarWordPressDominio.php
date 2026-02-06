@@ -15,81 +15,65 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
 
     public function __construct(public int $idDominio, public bool $forzar = false) {}
 
-    public function handle(): void
-    {
-        $dominio = DominiosModel::where('id_dominio', $this->idDominio)->first();
-        if (!$dominio) return;
-        if (!(int)$dominio->wp_auto_activo) return;
+   public function handle(): void
+{
+    $dominio = DominiosModel::where('id_dominio', $this->idDominio)->first();
+    if (!$dominio) {
+        Log::warning("WP JOB: dominio {$this->idDominio} no existe");
+        return;
+    }
 
-        // Si no es forzar, respeta la fecha (el command ya filtra, pero por seguridad)
-        if (!$this->forzar && $dominio->wp_siguiente_ejecucion && now()->lt($dominio->wp_siguiente_ejecucion)) {
-            return;
-        }
+    Log::info("WP JOB START dominio={$this->idDominio} forzar=" . ($this->forzar ? '1' : '0'));
 
-        // ✅ Cantidad por corrida (ej: 3)
-       $limit = max(1, (int)($dominio->wp_tareas_por_ejecucion ?? 3));
+    if (!(int)$dominio->wp_auto_activo) {
+        Log::info("WP JOB: wp_auto_activo=0 dominio={$this->idDominio}");
+        return;
+    }
 
-$contenidos = DB::table('dominios_contenido_detalles')
-    ->where('id_dominio', $this->idDominio)
-    ->where('estatus', 'generado') // ✅ ajusta si tu "listo" se llama distinto
-    ->where(function ($q) {
-        // pendientes de WP:
-        $q->whereNull('wp_post_id')->orWhere('wp_post_id', 0);
-    })
-    ->orderBy('id_dominio_contenido_detalle', 'asc')
-    ->limit($limit)
-    ->get();
+    if (!$this->forzar && $dominio->wp_siguiente_ejecucion && now()->lt($dominio->wp_siguiente_ejecucion)) {
+        Log::info("WP JOB: aun no toca dominio={$this->idDominio} next={$dominio->wp_siguiente_ejecucion}");
+        return;
+    }
 
-if ($contenidos->isEmpty()) {
-    $dominio->wp_siguiente_ejecucion = $this->calcularProximaEjecucionWp($dominio);
-    $dominio->save();
-    return;
-}
+    $limit = max(1, (int)($dominio->wp_tareas_por_ejecucion ?? 3));
 
-        // ✅ Publicar o Programar
-        if ($dominio->wp_auto_modo === 'publicar') {
-            foreach ($contenidos as $c) {
-                // TODO: enviar a WP publish
-                // $this->wpService->publicar($dominio, $c);
+    $query = DB::table('dominios_contenido_detalles')
+        ->where('id_dominio', $this->idDominio)
+        ->where('estatus', 'generado')
+        ->where(function ($q) {
+            $q->whereNull('wp_post_id')->orWhere('wp_post_id', 0);
+        })
+        ->orderBy('id_dominio_contenido_detalle', 'asc')
+        ->limit($limit);
 
-               DB::table('dominios_contenido_detalles')
-                ->where('id_dominio_contenido_detalle', $c->id_dominio_contenido_detalle)
-                ->update([
-                    'wp_post_id' => $wpPostId ?? 1, // ✅ pon aquí el ID real que te devuelva WP
-                    'wp_url'     => $wpUrl ?? null,
-                    'wp_link'    => $wpLink ?? null,
-                    'estatus'    => 'publicado', // opcional, si manejas estado final
-                    'updated_at' => now(),
-                ]);
-            }
-        } elseif ($dominio->wp_auto_modo === 'programar') {
-            $base = now()->addMinutes(10);
-            $step = max(1, (int)($dominio->wp_programar_cada_minutos ?? 60));
+    // Si vas a programar, evita reprogramar los que ya tienen fecha:
+    if ($dominio->wp_auto_modo === 'programar') {
+        $query->whereNull('scheduled_at');
+    }
 
-            foreach ($contenidos as $i => $c) {
-                $fecha = $base->copy()->addMinutes($i * $step);
+    $contenidos = $query->get();
 
-                // TODO: enviar a WP future con $fecha
-                // $this->wpService->programar($dominio, $c, $fecha);
+    Log::info("WP JOB: encontrados=" . $contenidos->count() . " dominio={$this->idDominio} modo={$dominio->wp_auto_modo} regla={$dominio->wp_regla_tipo}");
 
-                DB::table('dominios_contenido_detalles')
-                ->where('id_dominio_contenido_detalle', $c->id_dominio_contenido_detalle)
-                ->update([
-                    'scheduled_at' => $fecha,
-                    'estatus'      => 'programado', // opcional si lo usas
-                    'updated_at'   => now(),
-                ]);
-
-            }
-
-            // opcional: mantener tu campo existente
-            $dominio->wp_siguiente_programacion = now()->addMinutes($step);
-        }
-
-        // ✅ Recalcular próxima ejecución según regla
+    if ($contenidos->isEmpty()) {
         $dominio->wp_siguiente_ejecucion = $this->calcularProximaEjecucionWp($dominio);
         $dominio->save();
+        Log::info("WP JOB: sin contenido, next=" . $dominio->wp_siguiente_ejecucion);
+        return;
     }
+
+    // Aquí ya deberías llamar tu servicio WP real.
+    // Mientras tanto, deja log por cada item para confirmar ciclo
+    foreach ($contenidos as $c) {
+        Log::info("WP JOB ITEM id_detalle={$c->id_dominio_contenido_detalle} title=" . substr((string)$c->title, 0, 40));
+    }
+
+    // ✅ IMPORTANTE: al final siempre recalcula next
+    $dominio->wp_siguiente_ejecucion = $this->calcularProximaEjecucionWp($dominio);
+    $dominio->save();
+
+    Log::info("WP JOB END dominio={$this->idDominio} next=" . $dominio->wp_siguiente_ejecucion);
+}
 
     private function calcularProximaEjecucionWp($dominio)
     {
