@@ -4,7 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-
+use Illuminate\Support\Facades\DB;
 class Dominios_Contenido_DetallesModel extends Model
 {
     use HasFactory;
@@ -68,4 +68,21 @@ class Dominios_Contenido_DetallesModel extends Model
         'fecha_backlinks',
     ];
    
+
+
+
+     public static function ContenidoGenerado($IdUsuario,$esAdmin)
+    {
+        $q = DB::table('dominios_contenido_detalles as dcd')
+        ->join('dominios_contenido as dc', 'dc.id_dominio_contenido', '=', 'dcd.id_dominio_contenido')
+        ->wherein('dcd.estatus', ['generado','publicado','programado']);
+
+        // Si NO es admin, filtra por dominios que el usuario tenga en la pivote
+        if (!$esAdmin) {
+            $q->join('dominios_usuarios as du', 'du.id_dominio', '=', 'dc.id_dominio')
+            ->where('du.id_usuario', $IdUsuario);
+        }
+
+    return (int) $q->count('dcd.id_dominio_contenido_detalle');
+    }
 }

@@ -80,7 +80,7 @@
                                             <i class="ri-price-tag-3-fill"></i>
                                         </span>
                                         <span class="text-neutral-700 d-block">Total Contenido Gen.</span>
-                                        <h6 class="mb-0 mt-4">$170,500.09</h6>
+                                        <h6 class="mb-0 mt-4">{{$generado}}</h6>
                                     </div>
                                 </div>
                                 <div class="col-sm-6 col-xs-6">
@@ -89,7 +89,7 @@
                                             <i class="ri-shopping-cart-2-fill"></i>
                                         </span>
                                         <span class="text-neutral-700 d-block">Total Dominios Reg.</span>
-                                        <h6 class="mb-0 mt-4">1,500</h6>
+                                        <h6 class="mb-0 mt-4">{{$dominios}}</h6>
                                     </div>
                                 </div>
                                 <div class="col-sm-6 col-xs-6">
@@ -98,7 +98,7 @@
                                             <i class="ri-group-3-fill"></i>
                                         </span>
                                         <span class="text-neutral-700 d-block">Total Reportes</span>
-                                        <h6 class="mb-0 mt-4">12,300</h6>
+                                        <h6 class="mb-0 mt-4">{{$reportes}} </h6>
                                     </div>
                                 </div>
                                 <div class="col-sm-6 col-xs-6">

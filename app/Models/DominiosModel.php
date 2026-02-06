@@ -28,4 +28,14 @@ class DominiosModel extends Model
     ];
 
     protected $dateFormat = 'Y-m-d H:i:s'; //funcion para formateo de la fecha
+
+
+
+    public static function DominiosRegistrados($IdUsuario)
+    {   
+       return DB::table('dominios_usuarios as du')
+        ->join('dominios as d', 'd.id_dominio', '=', 'du.id_dominio')
+        ->where('du.id_usuario', '=', $IdUsuario)
+        ->count();
+    }
 }

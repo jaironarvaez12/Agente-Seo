@@ -9,20 +9,26 @@ use Carbon\Carbon;
 
 class LicenseService
 {
-    public function validateCached(string $licenseKey, string $domain): array
+    public function validateCached(string $licenseKey, string $domain, ?string $email = null): array
     {
         $domain = $this->host($domain);
-        $cacheKey = $this->validateCacheKey($licenseKey, $domain);
+        $cacheKey = $this->validateCacheKey($licenseKey, $domain, $email);
 
         if ($cached = Cache::get($cacheKey)) {
             return $cached;
         }
 
+        $payload = [
+            'license_key' => $licenseKey,
+            'domain'      => $domain,
+        ];
+
+        if ($email) {
+            $payload['email'] = $email;
+        }
+
         $resp = $this->client()
-            ->post('/api/licenses/validate', [
-                'license_key' => $licenseKey,
-                'domain' => $domain,
-            ])
+            ->post('/api/licenses/validate', $payload)
             ->throw()
             ->json();
 
@@ -97,7 +103,8 @@ class LicenseService
         }
 
         // ✅ SOLO VALIDAR (NO activar aquí)
-       $resp = $this->validateCached($licenseKey, $domain);
+       $resp = $this->validateCached($licenseKey, $domain, $email);
+
 
         $payload = [
             'plan'   => (string) data_get($resp, 'plan', 'free'),
@@ -202,16 +209,19 @@ class LicenseService
             ->acceptJson();
     }
 
-    private function validateCacheKey(string $licenseKey, string $domain): string
+    private function validateCacheKey(string $licenseKey, string $domain, ?string $email = null): string
     {
         $domain = $this->host($domain);
-        return "license:validate:" . sha1($licenseKey . '|' . $domain);
+        $email  = strtolower(trim((string)$email));
+        return "license:validate:" . sha1($licenseKey . '|' . $domain . '|' . $email);
     }
 
-    private function forgetValidateCache(string $licenseKey, string $domain): void
+
+    private function forgetValidateCache(string $licenseKey, string $domain, ?string $email = null): void
     {
-        Cache::forget($this->validateCacheKey($licenseKey, $domain));
+        Cache::forget($this->validateCacheKey($licenseKey, $domain, $email));
     }
+
 
     private function forgetLimitsCache(string $licenseKey, string $domain): void
     {
