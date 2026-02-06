@@ -9,3 +9,4 @@ Artisan::command('inspire', function () {
 
 
 Schedule::command('dominios:auto-generar')->everyMinute();
+Schedule::command('wp:programacion-run')->everyMinute()->withoutOverlapping();

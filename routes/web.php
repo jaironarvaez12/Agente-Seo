@@ -246,7 +246,9 @@ Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
     Route::get('configuracionprompt', [App\Http\Controllers\PromptGlobalController::class, 'editar'])->name('configuracionprompt');
     Route::post('guardarprompt', [App\Http\Controllers\PromptGlobalController::class, 'guardar'])->name('guardarprompt');
 
-
+  //nuevo programacion
+ Route::post('/dominios/{idDominio}/wp/ejecutar-ahora', [App\Http\Controllers\DominiosAutoGeneracionController::class, 'wpEjecutarAhora'])
+  ->name('dominios.wp.ejecutar_ahora');
 
 
 
