@@ -26,6 +26,8 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
 use App\Services\LicenseService;
 use App\Models\User;
+use Illuminate\Support\Facades\Storage;
+
 use App\Services\ServicioGenerarDominio;
 class DominiosController extends Controller
 {
@@ -392,41 +394,61 @@ class DominiosController extends Controller
     $dominio = DominiosModel::findOrFail($id);
 
     $wpBase  = env('TESTINGSEO_WP_URL', 'https://testingseo.entornodedesarrollo.es');
-    $secret  = env('TSEO_TPL_SECRET');
+    $secret  = (string) env('TSEO_TPL_SECRET', '');
 
+    // =========================
+    // 1) WP (como ya lo tienes)
+    // =========================
     $plantillas = [];
 
-    try {
-        $ts  = time();
-        $sig = hash_hmac('sha256', $ts.'.templates', (string)$secret);
+    // Si no hay secret, evitamos llamar WP (no rompe)
+    if (!empty($secret)) {
+        try {
+            $ts  = time();
+            $sig = hash_hmac('sha256', $ts . '.templates', $secret);
 
-        $res = Http::acceptJson()
-            ->withOptions(['verify' => false])
-            ->timeout(15)
-            ->get($wpBase.'/', [
-                'tseo_templates' => 1,
-                'ts' => $ts,
-                'sig' => $sig,
-            ]);
+            $res = Http::acceptJson()
+                ->withOptions(['verify' => false])
+                ->timeout(15)
+                ->get(rtrim($wpBase, '/').'/', [
+                    'tseo_templates' => 1,
+                    'ts' => $ts,
+                    'sig' => $sig,
+                ]);
 
-        // 👇 DEBUG CLAVE
-        // dd([
-        //     'url' => $res->effectiveUri() ?? null,
-        //     'status' => $res->status(),
-        //     'content_type' => $res->header('content-type'),
-        //     'body_snippet' => Str::limit($res->body(), 500),
-        //     'json' => $res->json(),
-        // ]);
-
-        if ($res->ok() && ($res->json('ok') === true)) {
-            $plantillas = $res->json('items') ?? [];
+            if ($res->ok() && ($res->json('ok') === true)) {
+                $plantillas = $res->json('items') ?? [];
+            }
+        } catch (\Throwable $e) {
+            // NO rompas el edit: solo deja WP vacío
+            $plantillas = [];
+            // opcional: \Log::warning('WP templates error: '.$e->getMessage());
         }
-    } catch (\Throwable $e) {
-        dd(['exception' => $e->getMessage()]);
-    }
-     return view('Dominios.DominioEdit', compact('dominio', 'plantillas'));
     }
 
+    // =========================
+    // 2) Local (storage/app/elementor) SIN preview
+    // =========================
+    $plantillasLocal = [];
+    $dir = storage_path('app/elementor');
+
+    if (File::isDirectory($dir)) {
+        foreach (File::files($dir) as $f) {
+            if (strtolower($f->getExtension()) !== 'json') continue;
+
+            $filename = $f->getFilename();
+            $plantillasLocal[] = [
+                'path' => 'elementor/' . $filename, // esto es lo que guardas en DB
+                'name' => $filename,                 // nombre para mostrar
+            ];
+        }
+
+        // Ordena por nombre
+        usort($plantillasLocal, fn($a, $b) => strcmp($a['name'], $b['name']));
+    }
+            //dd($plantillas);
+    return view('Dominios.DominioEdit', compact('dominio', 'plantillas', 'plantillasLocal'));
+}
 
 
 
@@ -1609,9 +1631,116 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
         return back()->with('exito', 'Backlinks en proceso.');
     }   
 
+    public function CargarPlantillas()
+    {
+        $usuario = auth()->user();
+      
+
+        
+
+      
+
+        return view('Dominios.CargarPlantillas', compact('usuario'));
+    }
 
 
+     public function GuardarPlantilla(Request $request)
+    {
+         $request->validate([
+            'archivo' => ['required', 'file', 'extensions:json', 'max:5120'],
+        ]);
+
+        // 1) Leer JSON subido
+        $raw = json_decode(file_get_contents($request->file('archivo')->getRealPath()), true);
+        if (!is_array($raw)) {
+            return back()->with('error', 'El archivo subido no es un JSON válido.');
+        }
+    
+        // 2) Cargar plantilla base tokenizada (colócala en: storage/app/templates/elementor-10.json)
+        $basePath = storage_path('app/elementor/elementor-10.json');
+   
+        if (!file_exists($basePath)) {
+            return back()->with('error', 'Falta la plantilla base tokenizada en storage/app/elementor/elementor-10.json');
+        }
+
+        $tmpl = json_decode(file_get_contents($basePath), true);
+        if (!is_array($tmpl)) {
+            return back()->with('error', 'La plantilla base tokenizada no es un JSON válido.');
+        }
+
+        // 3) Tokenizar por "espejo"
+        $tokens = [];
+        $tokenizado = $this->applyTokensByMirror($raw, $tmpl, $tokens);
+
+  $outName = 'elementor_token_' . date('Ymd_His') . '_' . uniqid() . '.json';
+$dir = storage_path('app/elementor');
+
+if (!is_dir($dir)) {
+    mkdir($dir, 0755, true);
+}
+
+$fullPath = $dir . DIRECTORY_SEPARATOR . $outName;
+
+file_put_contents(
+    $fullPath,
+    json_encode($tokenizado, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)
+);
+
+      return redirect("cargarplantillas")
+   ->withSuccess('Plantilla guardada exitosamente en: ' . $fullPath);
+
+    }
+    private function applyTokensByMirror($raw, $tmpl, array &$tokens)
+    {
+        // Si ambos son arrays: recursivo
+        if (is_array($raw) && is_array($tmpl)) {
+            // lista
+            if (array_is_list($raw) && array_is_list($tmpl)) {
+                $len = min(count($raw), count($tmpl));
+                $out = $raw;
+                for ($i = 0; $i < $len; $i++) {
+                    $out[$i] = $this->applyTokensByMirror($raw[$i], $tmpl[$i], $tokens);
+                }
+                return $out;
+            }
+
+            // asociativo
+            $out = $raw;
+            foreach ($raw as $k => $v) {
+                if (array_key_exists($k, $tmpl)) {
+                    $out[$k] = $this->applyTokensByMirror($v, $tmpl[$k], $tokens);
+                }
+            }
+            return $out;
+        }
+
+        // Si en la plantilla hay un token puro, reemplaza el string raw por el token
+        if (is_string($tmpl) && $this->looksLikeToken($tmpl) && is_string($raw)) {
+            $tokens[] = $tmpl;
+            return $tmpl;
+        }
+
+        // Si el token está dentro de HTML (ej: "<p>{{CONT_1}}</p>")
+        if (is_string($tmpl) && $this->containsToken($tmpl) && is_string($raw)) {
+            preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $tmpl, $m);
+            foreach ($m[0] ?? [] as $t) $tokens[] = $t;
+            return $tmpl;
+        }
+
+        return $raw;
+    }
+
+    private function looksLikeToken(string $s): bool
+    {
+        return (bool) preg_match('/^\{\{[A-Z0-9_]+\}\}$/', trim($s));
+    }
+
+    private function containsToken(string $s): bool
+    {
+        return (bool) preg_match('/\{\{[A-Z0-9_]+\}\}/', $s);
+    }
 }
 
 
 
+ 

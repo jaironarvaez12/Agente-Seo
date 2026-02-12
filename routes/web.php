@@ -250,7 +250,10 @@ Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
  Route::post('/dominios/{idDominio}/wp/ejecutar-ahora', [App\Http\Controllers\DominiosAutoGeneracionController::class, 'wpEjecutarAhora'])
   ->name('dominios.wp.ejecutar_ahora');
 
-
+// cargar plantillas
+ 
+    Route::get('cargarplantillas', [App\Http\Controllers\DominiosController::class, 'CargarPlantillas'])->name('cargarplantillas');
+    Route::post('guardarplantillas', [App\Http\Controllers\DominiosController::class, 'GuardarPlantilla'])->name('guardarplantillas');
 
     });
 

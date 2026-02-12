@@ -50,95 +50,98 @@
                                     <textarea class="form-control radius-8" id="url" name="url" readonly
                                               rows="2" placeholder="https://ideiweb.com/">{{ old('url', $dominio->url ?? '') }}</textarea>
                                 </div>
+
                                 <!-- Upload Image Start -->
-                            <div class="mb-24 mt-16">
-                                 <label for="url" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Logo 
+                                <div class="mb-24 mt-16">
+                                    <label for="url" class="form-label fw-semibold text-primary-light text-sm mb-8">
+                                        Logo
                                     </label>
-                                <div class="avatar-upload">
-                                   <div class="avatar-edit position-absolute bottom-0 end-0 me-24 mt-16 z-1 cursor-pointer">
-                                        <input type='file' id="imagen" name="imagen" accept=".png, .jpg, .jpeg" hidden >
-                                        <label for="imagen" class="w-32-px h-32-px d-flex justify-content-center align-items-center bg-primary-50 text-primary-600 border border-primary-600 bg-hover-primary-100 text-lg rounded-circle">
-                                            <iconify-icon icon="solar:camera-outline" class="icon"></iconify-icon>
-                                        </label>
-                                    </div>
-                                    @php
-                                        $imgRel = $dominio->imagen ?? null;
-                                        $baseUrl = ($imgRel && file_exists(public_path($imgRel)))
-                                            ? asset($imgRel)
-                                            : asset('images/placeholder.jpg');
+                                    <div class="avatar-upload">
+                                        <div class="avatar-edit position-absolute bottom-0 end-0 me-24 mt-16 z-1 cursor-pointer">
+                                            <input type='file' id="imagen" name="imagen" accept=".png, .jpg, .jpeg" hidden >
+                                            <label for="imagen" class="w-32-px h-32-px d-flex justify-content-center align-items-center bg-primary-50 text-primary-600 border border-primary-600 bg-hover-primary-100 text-lg rounded-circle">
+                                                <iconify-icon icon="solar:camera-outline" class="icon"></iconify-icon>
+                                            </label>
+                                        </div>
+                                        @php
+                                            $imgRel = $dominio->imagen ?? null;
+                                            $baseUrl = ($imgRel && file_exists(public_path($imgRel)))
+                                                ? asset($imgRel)
+                                                : asset('images/placeholder.jpg');
+                                            $imgUrl = $baseUrl . '?v=' . time();
+                                        @endphp
 
-                                        // ✅ Versión súper simple para evitar caché:
-                                        $imgUrl = $baseUrl . '?v=' . time();
-                                    @endphp
-
-                                    <div class="hover-scale-img border radius-16 overflow-hidden p-8" style="width:160px;">
-                                        <a href="{{ $imgUrl }}" class="popup-img w-100 h-100 d-flex radius-12 overflow-hidden">
-                                            <img id="avatar-img"
-                                                src="{{ $imgUrl }}"
-                                                alt="Imagen"
-                                                class="hover-scale-img__img w-100 h-100 object-fit-cover radius-12"
-                                                style="object-fit: cover; height:160px;">
-                                        </a>
+                                        <div class="hover-scale-img border radius-16 overflow-hidden p-8" style="width:160px;">
+                                            <a href="{{ $imgUrl }}" class="popup-img w-100 h-100 d-flex radius-12 overflow-hidden">
+                                                <img id="avatar-img"
+                                                     src="{{ $imgUrl }}"
+                                                     alt="Imagen"
+                                                     class="hover-scale-img__img w-100 h-100 object-fit-cover radius-12"
+                                                     style="object-fit: cover; height:160px;">
+                                            </a>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                            <div class="form-switch switch-primary d-flex align-items-center gap-3 mb-12">
-                                <input
-                                    class="form-check-input"
-                                    type="checkbox"
-                                    role="switch"
-                                    id="solo_html"
-                                    name="solo_html"
-                                    value="1"
-                                    {{ old('solo_html', is_null($dominio->elementor_template_path)) ? 'checked' : '' }}
-                                >
-                                <label class="form-check-label line-height-1 fw-medium text-secondary-light" for="solo_html">
-                                    Solo texto HTML (no usar plantilla Elementor)
-                                </label>
-                            </div>
 
-                            <!-- Upload Image End -->
-                                {{-- <div class="mb-20">
-                                    <label for="usuario" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Usuario<span class="text-danger-600">*</span>
+                                <div class="form-switch switch-primary d-flex align-items-center gap-3 mb-12">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        role="switch"
+                                        id="solo_html"
+                                        name="solo_html"
+                                        value="1"
+                                        {{ old('solo_html', is_null($dominio->elementor_template_path)) ? 'checked' : '' }}
+                                    >
+                                    <label class="form-check-label line-height-1 fw-medium text-secondary-light" for="solo_html">
+                                        Solo texto HTML (no usar plantilla Elementor)
                                     </label>
-                                    <input type="text" class="form-control radius-8" id="usuario" name="usuario"
-                                           value="{{ old('usuario', $dominio->usuario ?? '') }}">
                                 </div>
 
-                                <div class="mb-20">
-                                    <label for="password" class="form-label fw-semibold text-primary-light text-sm mb-8">
-                                        Contraseña<span class="text-danger-600">*</span>
-                                    </label>
-                                    <input type="password" class="form-control radius-8" id="password" name="password"
-                                           placeholder="Ingrese su contraseña ">
-                                </div> --}}
+                                {{-- =========================================================
+                                   PLANTILLAS -> elementor_template_path (WP + Local, sin duplicados)
+                                   ========================================================= --}}
+                                @php
+                                    $wpBase = env('TESTINGSEO_WP_URL', 'https://testingseo.entornodedesarrollo.es');
+                                    $secret = (string) env('TSEO_TPL_SECRET', '');
 
-                                {{-- ============================================
-                                   PLANTILLAS (WP) -> Guarda elementor_template_path
-                                   ============================================ --}}
-                               @php
-                                    $wpBase = 'https://testingseo.entornodedesarrollo.es';
-                                    $secret = env('TSEO_TPL_SECRET');
-
+                                    // WP ID -> JSON path
                                     $wpIdToJsonPath = [
                                         179 => 'elementor/elementor-10.json',
                                         130 => 'elementor/elementor-idei.json',
                                         265 => 'elementor/elementor-nueva.json',
                                     ];
 
-                                    // ✅ NUEVO MAPA: ID WP -> imagen
+                                    // WP ID -> imagen (opcional)
                                     $wpIdToBg = [
-                                     
                                         130 => asset('assets/images/PRUEBA.png'),
-                                          179 => asset('assets/images/Plantilla Nueva.png'),
+                                        179 => asset('assets/images/Plantilla Nueva.png'),
                                     ];
 
-                                    // Imagen por defecto (si no hay en el mapa)
-                                    $defaultBg = asset('assets/images/tpls/default.png');
-
                                     $selectedPath = old('elementor_template_path', $dominio->elementor_template_path ?? '');
+
+                                    // ---------- DEDUPE ----------
+                                    // 1) paths cubiertos por WP (según tu mapeo wpIdToJsonPath)
+                                    $wpPaths = [];
+                                    if (!empty($plantillas)) {
+                                        foreach ($plantillas as $tpl) {
+                                            $id = $tpl['id'] ?? null;
+                                            $p = $wpIdToJsonPath[$id] ?? '';
+                                            if (!empty($p)) $wpPaths[$p] = true;
+                                        }
+                                    }
+
+                                    // 2) filtrar locales: quitar las que ya estén cubiertas por WP
+                                    $plantillasLocalFiltradas = [];
+                                    if (!empty($plantillasLocal)) {
+                                        foreach ($plantillasLocal as $t) {
+                                            $p = $t['path'] ?? '';
+                                            if (empty($p)) continue;
+                                            if (!isset($wpPaths[$p])) {
+                                                $plantillasLocalFiltradas[] = $t;
+                                            }
+                                        }
+                                    }
                                 @endphp
 
                                 <div class="mb-20">
@@ -146,40 +149,43 @@
                                         Plantilla Elementor
                                     </label>
 
-                                    {{-- Este es el que se guarda en DB --}}
                                     <input type="hidden" id="elementor_template_path" name="elementor_template_path" value="{{ $selectedPath }}">
 
+                                    {{-- =========================
+                                       Sección WP (con previsualización)
+                                       ========================= --}}
+                                    <div class="mt-2 mb-2">
+                                        <div class="fw-semibold text-secondary-light">Plantillas WordPress (con preview)</div>
+                                        <small class="text-muted">Estas se cargan desde WordPress y permiten "Ver".</small>
+                                    </div>
+
                                     @if(empty($plantillas))
-                                        <div class="alert alert-warning mb-0">
+                                        <div class="alert alert-warning mb-3">
                                             No se pudieron cargar las plantillas desde WordPress.
                                         </div>
                                     @else
-                                        <div class="row g-3">
+                                        <div class="row g-3 mb-4">
                                             @foreach($plantillas as $tpl)
                                                 @php
                                                     $id = $tpl['id'] ?? null;
                                                     $title = $tpl['title'] ?? 'Sin título';
 
-                                                    // Preview real (solo al dar "Ver")
+                                                    // Preview WP (como lo tenías)
                                                     $ts = time();
-                                                    $sig = hash_hmac('sha256', $ts.'.preview.'.$id, $secret);
-                                                    $previewUrl = $wpBase.'/?tseo_preview=1&id='.$id.'&ts='.$ts.'&sig='.$sig;
+                                                    $sigPrev = hash_hmac('sha256', $ts.'.preview.'.$id, $secret);
+                                                    $previewUrl = rtrim($wpBase,'/').'/?tseo_preview=1&id='.$id.'&ts='.$ts.'&sig='.$sigPrev;
 
-                                                    // Path que se va a guardar en elementor_template_path
+                                                    // Path que se guardará en DB
                                                     $jsonPath = $wpIdToJsonPath[$id] ?? '';
                                                     $isSelected = ($jsonPath !== '' && $selectedPath === $jsonPath);
+
+                                                    $fixedBg = $wpIdToBg[$id] ?? null;
                                                 @endphp
 
                                                 <div class="col-md-6">
                                                     <div class="tpl-card border radius-12 overflow-hidden bg-white {{ $isSelected ? 'tpl-selected' : '' }}">
-                                                        {{-- Miniatura genérica (solo imagen visual) --}}
-                                                       @php
-                                                            $fixedBg = $wpIdToBg[$id] ?? null; // ✅ si no existe, queda gris
-                                                        @endphp
-
-
                                                         <div class="d-flex align-items-center justify-content-center position-relative overflow-hidden"
-                                                            style="
+                                                             style="
                                                                 height:180px;
                                                                 background:#f6f7f9;
                                                                 @if(!empty($fixedBg))
@@ -188,12 +194,11 @@
                                                                     background-size:cover;
                                                                     background-repeat:no-repeat;
                                                                 @endif
-                                                            ">
+                                                             ">
 
-                                                            {{-- Overlay para legibilidad (solo si hay imagen) --}}
                                                             @if(!empty($fixedBg))
                                                                 <div class="position-absolute top-0 start-0 w-100 h-100"
-                                                                    style="background:rgba(0,0,0,.35);"></div>
+                                                                     style="background:rgba(0,0,0,.35);"></div>
                                                             @endif
 
                                                             <div class="text-center px-3 position-relative" style="z-index:1;">
@@ -213,7 +218,7 @@
                                                                     </div>
                                                                 @else
                                                                     <div class="mt-1">
-                                                                        <small class="{{ !empty($fixedBg) ? 'text-warning' : 'text-warning' }}">
+                                                                        <small class="text-warning">
                                                                             Sin mapeo a JSON
                                                                         </small>
                                                                     </div>
@@ -240,12 +245,57 @@
                                                 </div>
                                             @endforeach
                                         </div>
-
-                                        <small class="text-muted d-block mt-2">
-                                            - <strong>Ver</strong> abre la plantilla completa (solo vista) en WordPress.<br>
-                                            - <strong>Seleccionar</strong> guardará el valor en <code>elementor_template_path</code> (cuando exista mapeo).
-                                        </small>
                                     @endif
+
+                                    {{-- =========================
+                                       Sección Local (sin previsualización, sin duplicados)
+                                       ========================= --}}
+                                    <div class="mt-2 mb-2">
+                                        <div class="fw-semibold text-secondary-light">Plantillas Locales (sin preview)</div>
+                                        <small class="text-muted">Solo se muestran las que NO estén ya cubiertas por WordPress.</small>
+                                    </div>
+
+                                    @if(empty($plantillasLocalFiltradas))
+                                        <div class="alert alert-warning mb-0">
+                                            No hay plantillas locales nuevas (las demás ya están en WordPress).
+                                        </div>
+                                    @else
+                                        <div class="row g-3">
+                                            @foreach($plantillasLocalFiltradas as $tpl)
+                                                @php
+                                                    $path = $tpl['path'] ?? '';
+                                                    $title = $tpl['name'] ?? 'Plantilla local';
+                                                    $isSelected = ($path !== '' && $selectedPath === $path);
+                                                @endphp
+
+                                                <div class="col-md-6">
+                                                    <div class="tpl-card border radius-12 overflow-hidden bg-white {{ $isSelected ? 'tpl-selected' : '' }}">
+                                                        <div class="d-flex align-items-center justify-content-center position-relative overflow-hidden"
+                                                             style="height:180px;background:#f6f7f9;">
+                                                            <div class="text-center px-3">
+                                                                <div class="fw-semibold text-dark">{{ $title }}</div>
+                                                                <small class="text-muted">Guardará: {{ $path }}</small>
+                                                            </div>
+                                                        </div>
+
+                                                        <div class="p-12 d-flex align-items-center justify-content-end gap-2">
+                                                            <button type="button"
+                                                                    class="btn btn-sm btn-outline-primary tpl-select-btn"
+                                                                    data-path="{{ $path }}"
+                                                                    {{ $path === '' ? 'disabled' : '' }}>
+                                                                Seleccionar
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            @endforeach
+                                        </div>
+                                    @endif
+
+                                    <small class="text-muted d-block mt-2">
+                                        - <strong>Ver</strong> abre la plantilla completa en WordPress (solo WP).<br>
+                                        - <strong>Seleccionar</strong> guardará el valor en <code>elementor_template_path</code>.
+                                    </small>
                                 </div>
 
                                 <div class="d-flex align-items-center justify-content-center gap-3 mt-4">
@@ -294,7 +344,7 @@
     });
   });
 
-  // Tu listener de imagen (queda igual)
+  // Listener de imagen (igual)
   document.getElementById('imagen')?.addEventListener('change', function (e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
@@ -303,12 +353,8 @@
     const imgTag = document.getElementById('avatar-img');
     const link = document.querySelector('.popup-img');
 
-    if (imgTag) {
-      imgTag.src = url;
-    }
-    if (link) {
-      link.href = url;
-    }
+    if (imgTag) imgTag.src = url;
+    if (link) link.href = url;
 
     const img = new Image();
     img.onload = () => URL.revokeObjectURL(url);
@@ -324,6 +370,7 @@
         gallery: { enabled: true }
     });
 </script>
+
 <script>
   const soloHtml = document.getElementById('solo_html');
   const inputPath = document.getElementById('elementor_template_path');
@@ -332,16 +379,10 @@
     const checked = !!soloHtml?.checked;
 
     if (checked) {
-      // Limpia el valor (backend lo convierte a NULL)
       if (inputPath) inputPath.value = '';
-
-      // Quita selección visual
       document.querySelectorAll('.tpl-card').forEach(c => c.classList.remove('tpl-selected'));
-
-      // Deshabilita botones seleccionar
       document.querySelectorAll('.tpl-select-btn').forEach(b => b.disabled = true);
     } else {
-      // Habilita solo los que tengan path válido
       document.querySelectorAll('.tpl-select-btn').forEach(b => {
         const p = b.dataset.path || '';
         b.disabled = (p === '');
@@ -352,7 +393,7 @@
   soloHtml?.addEventListener('change', applySoloHtmlState);
   applySoloHtmlState();
 
-  // Si selecciona plantilla, apaga el switch automáticamente (recomendado)
+  // Si selecciona plantilla, apaga el switch automáticamente
   document.querySelectorAll('.tpl-select-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       if (soloHtml && soloHtml.checked) soloHtml.checked = false;

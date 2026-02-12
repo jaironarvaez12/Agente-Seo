@@ -238,6 +238,9 @@
           <li>
             <a href="{{ route('configuracionprompt') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Prompt Generador SEO</a>
           </li>
+          <li>
+            <a href="{{ route('cargarplantillas') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>Cargar Plantilla </a>
+          </li>
          
          
 
