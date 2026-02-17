@@ -1167,6 +1167,7 @@ public function publicar($dominio, int $detalle): RedirectResponse
         $it->estatus = (($json['status'] ?? '') === 'publish') ? 'publicado' : 'generado';
         $it->wp_id   = (int)($json['wp_id'] ?? 0) ?: $it->wp_id;
         $it->wp_link = (string)($json['link'] ?? '');
+        $it->fecha_publicado= now();
         $it->save();
 
         return back()->with('exito', 'Contenido enviado y publicado en WordPress.');

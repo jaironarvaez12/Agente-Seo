@@ -28,6 +28,8 @@ class Dominios_Contenido_DetallesModel extends Model
         'id_dominio'           => 'integer',
         'resultado_backlinks' => 'array',
         'fecha_backlinks' => 'datetime',
+        'fecha_publicado' => 'datetime',
+        
     ];
 
     protected $fillable = [
@@ -56,6 +58,8 @@ class Dominios_Contenido_DetallesModel extends Model
         'wp_link',
 
         'scheduled_at',
+        'fecha_publicado',
+        
 
         'estatus',
         'error',

@@ -130,6 +130,7 @@ class TrabajoAutoEnviarWordPressDominio implements ShouldQueue
                     'wp_link'    => (string)($json['link'] ?? ''),
                     'error'      => null,
                     'updated_at' => now(),
+                    'fecha_publicado'=> now(),
                 ];
 
                 if ($wpStatus === 'future') {
