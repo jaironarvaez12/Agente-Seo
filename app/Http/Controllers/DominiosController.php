@@ -1644,52 +1644,331 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     }
 
 
-     public function GuardarPlantilla(Request $request)
-    {
-         $request->validate([
-            'archivo' => ['required', 'file', 'extensions:json', 'max:5120'],
+   public function GuardarPlantilla(Request $request)
+{
+    $request->validate([
+        'archivo' => ['required', 'file', 'max:5120'],
+    ]);
+
+    $rawStr = file_get_contents($request->file('archivo')->getRealPath());
+    $raw = json_decode($rawStr, true);
+
+    if (!is_array($raw)) {
+        return redirect("cargarplantillas")
+            ->withErrors(['archivo' => 'El archivo no es un JSON válido.']);
+    }
+
+    // 1) Detectar widgets especiales (NO bloquear, solo no tokenizar dentro)
+    $widgetTypes = $this->scanWidgetTypes($raw);
+    $unsupportedSet = $this->getUnsupportedWidgetSet($widgetTypes);
+
+    // 2) Contar SOLO lo tokenizable (no especiales, no números, no links.url)
+    $need = $this->countTokenizableFieldsSmart($raw, $unsupportedSet);
+
+    // Límite
+    $max = 70;
+    if ($need > $max) {
+        return redirect("cargarplantillas")->withErrors([
+            'archivo' => "Plantilla demasiado larga. Campos tokenizables: $need. Máximo permitido: $max."
         ]);
+    }
 
-        // 1) Leer JSON subido
-        $raw = json_decode(file_get_contents($request->file('archivo')->getRealPath()), true);
-        if (!is_array($raw)) {
-            return back()->with('error', 'El archivo subido no es un JSON válido.');
-        }
-    
-        // 2) Cargar plantilla base tokenizada (colócala en: storage/app/templates/elementor-10.json)
-        $basePath = storage_path('app/elementor/elementor-10.json');
-   
-        if (!file_exists($basePath)) {
-            return back()->with('error', 'Falta la plantilla base tokenizada en storage/app/elementor/elementor-10.json');
-        }
+    // 3) Tokenizar por tipo (TITLE vs P vs BTN_TEXT vs BTN_URL), sin tocar link.url
+    $usedTokens = [];
+    $tokenizado = $this->tokenizeTemplateSmart($raw, $unsupportedSet, $usedTokens);
 
-        $tmpl = json_decode(file_get_contents($basePath), true);
-        if (!is_array($tmpl)) {
-            return back()->with('error', 'La plantilla base tokenizada no es un JSON válido.');
-        }
+    // 4) Guardar
+    $outName = 'elementor_token_' . date('Ymd_His') . '_' . uniqid() . '.json';
+    $dir = storage_path('app/elementor');
+    if (!is_dir($dir)) mkdir($dir, 0755, true);
 
-        // 3) Tokenizar por "espejo"
-        $tokens = [];
-        $tokenizado = $this->applyTokensByMirror($raw, $tmpl, $tokens);
+    file_put_contents(
+        $dir . DIRECTORY_SEPARATOR . $outName,
+        json_encode($tokenizado, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+    );
 
-  $outName = 'elementor_token_' . date('Ymd_His') . '_' . uniqid() . '.json';
-$dir = storage_path('app/elementor');
-
-if (!is_dir($dir)) {
-    mkdir($dir, 0755, true);
+    return redirect("cargarplantillas")
+        ->withSuccess("Plantilla tokenizada y guardada en: storage/app/elementor/$outName (tokens usados: " . count($usedTokens) . ")");
 }
 
-$fullPath = $dir . DIRECTORY_SEPARATOR . $outName;
 
-file_put_contents(
-    $fullPath,
-    json_encode($tokenizado, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)
-);
 
-      return redirect("cargarplantillas")
-   ->withSuccess('Plantilla guardada exitosamente en: ' . $fullPath);
+private function tokenizeTemplateSmart(array $json, array $unsupportedSet, array &$usedTokens): array
+{
+    $usedTokens = [];
 
+    // contadores separados para no mezclar TITLE/P
+    $secTitleN = 1;
+    $secPN     = 1;
+    $btnN      = 1;
+
+    // 2 botones “fijos” (primero que aparezcan)
+    $heroBtnUsed = false;
+    $packBtnUsed = false;
+
+    $nextSectionTitleToken = function(bool $short) use (&$secTitleN, &$usedTokens) {
+        $tok = $short
+            ? '{{SECTION_'.$secTitleN.'_TITLE_SHORT}}'
+            : '{{SECTION_'.$secTitleN.'_TITLE}}';
+        $usedTokens[] = $tok;
+        $secTitleN++;
+        return $tok;
+    };
+
+    $nextSectionPToken = function(bool $short) use (&$secPN, &$usedTokens) {
+        $tok = $short
+            ? '{{SECTION_'.$secPN.'_P_SHORT}}'
+            : '{{SECTION_'.$secPN.'_P}}';
+        $usedTokens[] = $tok;
+        $secPN++;
+        return $tok;
+    };
+
+    $nextBtnTextToken = function() use (&$btnN, &$usedTokens, &$heroBtnUsed, &$packBtnUsed) {
+        if (!$heroBtnUsed) {
+            $heroBtnUsed = true;
+            $usedTokens[] = '{{HERO_BTN_TEXT}}';
+            return '{{HERO_BTN_TEXT}}';
+        }
+        if (!$packBtnUsed) {
+            $packBtnUsed = true;
+            $usedTokens[] = '{{PACK_BTN_TEXT}}';
+            return '{{PACK_BTN_TEXT}}';
+        }
+        $tok = '{{BTN_'.$btnN.'_TEXT}}';
+        $usedTokens[] = $tok;
+        $btnN++;
+        return $tok;
+    };
+
+    $wrapIfHtml = function(string $original, string $token): string {
+        // si el original tenía HTML, mantenlo simple para Elementor
+        if (preg_match('/<[^>]+>/', $original)) return '<p>'.$token.'</p>';
+        return $token;
+    };
+
+    $walk = function($node) use (&$walk, $unsupportedSet, $wrapIfHtml, $nextSectionTitleToken, $nextSectionPToken, $nextBtnTextToken) {
+        if (!is_array($node)) return $node;
+
+        if (($node['elType'] ?? null) === 'widget') {
+            $wt = strtolower((string)($node['widgetType'] ?? ''));
+
+            // ✅ Widget especial => NO tokenizar settings (copiar tal cual)
+            if ($wt !== '' && isset($unsupportedSet[$wt])) {
+                // igual recorremos hijos por seguridad (normalmente widget no tiene)
+                foreach (['elements','content'] as $k) {
+                    if (!empty($node[$k]) && is_array($node[$k])) {
+                        foreach ($node[$k] as $i => $child) $node[$k][$i] = $walk($child);
+                    }
+                }
+                return $node;
+            }
+
+            $settings = $node['settings'] ?? [];
+            if (is_array($settings)) {
+
+                // Heading -> TITLE token
+                if ($wt === 'heading' && !empty($settings['title']) && is_string($settings['title'])) {
+                    $orig = $settings['title'];
+
+                    // ❌ no tokenizar si es número puro
+                    if (!$this->isNumericOnly($orig)) {
+                        $short = $this->isShortMicrocopy($orig, 'heading', 'title');
+                        $tok   = $nextSectionTitleToken($short);
+                        $settings['title'] = $wrapIfHtml($orig, $tok);
+                    }
+                }
+
+                // Text editor -> P token
+                if ($wt === 'text-editor' && !empty($settings['editor']) && is_string($settings['editor'])) {
+                    $orig = $settings['editor'];
+
+                    if (!$this->isNumericOnly($orig)) {
+                        $short = $this->isShortMicrocopy($orig, 'text-editor', 'editor');
+                        $tok   = $nextSectionPToken($short);
+                        $settings['editor'] = $wrapIfHtml($orig, $tok);
+                    }
+                }
+
+                // Button -> tokenizar SOLO texto, NO URL
+                if ($wt === 'button') {
+                    if (!empty($settings['text']) && is_string($settings['text'])) {
+                        $orig = $settings['text'];
+                        if (!$this->isNumericOnly($orig)) {
+                            $tok = $nextBtnTextToken();
+                            $settings['text'] = $wrapIfHtml($orig, $tok);
+                        }
+                    } elseif (!empty($settings['button_text']) && is_string($settings['button_text'])) {
+                        $orig = $settings['button_text'];
+                        if (!$this->isNumericOnly($orig)) {
+                            $tok = $nextBtnTextToken();
+                            $settings['button_text'] = $wrapIfHtml($orig, $tok);
+                        }
+                    }
+
+                    // ✅ NO tocar link.url
+                }
+
+                $node['settings'] = $settings;
+            }
+        }
+
+        // recorrer hijos (secciones/columnas)
+        foreach (['elements','content'] as $k) {
+            if (!empty($node[$k]) && is_array($node[$k])) {
+                foreach ($node[$k] as $i => $child) $node[$k][$i] = $walk($child);
+            }
+        }
+
+        return $node;
+    };
+
+    return $walk($json);
+}
+
+
+private function wrapIfHtml(string $original, string $token): string
+{
+    // Si parece HTML, lo dejamos en <p>{{TOKEN}}</p> (como venías haciendo)
+    if (preg_match('/<[^>]+>/', $original)) return '<p>' . $token . '</p>';
+    return $token;
+}
+
+
+private function shouldTokenizeText(string $value, string $kind = 'p'): bool
+{
+    $t = trim(strip_tags($value));
+    if ($t === '') return false;
+
+    // números (incluye 01, 1.5, 1,000, 10%)
+    if ($this->isNumericLike($t)) return false;
+
+    return true;
+}
+
+private function isNumericLike(string $t): bool
+{
+    $t = trim($t);
+
+    // "01" o "1" o "123"
+    if (preg_match('/^\d+$/', $t)) return true;
+
+    // "1.5" "1,5" "1,000" "1.000" "10%" "10 %"
+    if (preg_match('/^\d+(?:[.,]\d+)*\s*%?$/', $t)) return true;
+
+    // "01." "02)" etc (muy típico en steps)
+    if (preg_match('/^\d+\s*[\.\)]$/', $t)) return true;
+
+    return false;
+}
+
+/**
+ * Cuenta tokenizable real (por tipo), SIN tocar links.url y SIN números.
+ */
+private function countTokenizableFieldsSmart(array $json, array $unsupportedSet): int
+{
+    $count = 0;
+
+    $walk = function($node) use (&$walk, &$count, $unsupportedSet) {
+        if (!is_array($node)) return;
+
+        if (($node['elType'] ?? null) === 'widget') {
+            $wt = strtolower((string)($node['widgetType'] ?? ''));
+
+            // widget especial => no tokenizar dentro
+            if ($wt !== '' && isset($unsupportedSet[$wt])) {
+                return;
+            }
+
+            $settings = $node['settings'] ?? [];
+            if (is_array($settings)) {
+
+                if ($wt === 'heading' && !empty($settings['title']) && is_string($settings['title'])) {
+                    if (!$this->isNumericOnly($settings['title'])) $count++;
+                }
+
+                if ($wt === 'text-editor' && !empty($settings['editor']) && is_string($settings['editor'])) {
+                    if (!$this->isNumericOnly($settings['editor'])) $count++;
+                }
+
+                if ($wt === 'button') {
+                    $btnText = null;
+                    if (!empty($settings['text']) && is_string($settings['text'])) $btnText = $settings['text'];
+                    elseif (!empty($settings['button_text']) && is_string($settings['button_text'])) $btnText = $settings['button_text'];
+
+                    if (is_string($btnText) && $btnText !== '' && !$this->isNumericOnly($btnText)) {
+                        $count++;
+                    }
+
+                    // ❌ NO contamos URL
+                }
+            }
+        }
+
+        foreach (['elements','content'] as $k) {
+            if (!empty($node[$k]) && is_array($node[$k])) {
+                foreach ($node[$k] as $child) $walk($child);
+            }
+        }
+    };
+
+    $walk($json);
+    return $count;
+}
+
+
+
+private function plainText(string $s): string
+{
+    $s = html_entity_decode((string)$s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $s = strip_tags($s);
+    $s = preg_replace('~\s+~u', ' ', $s);
+    return trim((string)$s);
+}
+
+private function isNumericOnly(string $s): bool
+{
+    $t = $this->plainText($s);
+    if ($t === '') return false;
+
+    // "01", "1", "2026", "3.14", "1,5"
+    return (bool)preg_match('~^\d+(?:[.,]\d+)?$~u', $t);
+}
+
+private function wordCount(string $s): int
+{
+    $t = $this->plainText($s);
+    if ($t === '') return 0;
+    $w = preg_split('~\s+~u', $t, -1, PREG_SPLIT_NO_EMPTY);
+    return is_array($w) ? count($w) : 0;
+}
+
+private function isShortMicrocopy(string $original, string $widgetType, string $fieldKey): bool
+{
+    $len = mb_strlen($this->plainText($original));
+    if ($len === 0) return false;
+
+    $wt = strtolower($widgetType);
+
+    // Heading micro (labels)
+    if ($wt === 'heading' && $fieldKey === 'title') {
+        if ($len <= 18) return true;
+        if ($this->wordCount($original) <= 3) return true;
+        return false;
     }
+
+    // Text editor micro (badges, numeritos, labels)
+    if ($wt === 'text-editor' && $fieldKey === 'editor') {
+        if ($len <= 55) return true;
+        $plain = $this->plainText($original);
+        if ($len <= 75 && !preg_match('~[.!?]~u', $plain)) return true;
+        return false;
+    }
+
+    return false;
+}
+
+
     private function applyTokensByMirror($raw, $tmpl, array &$tokens)
     {
         // Si ambos son arrays: recursivo
@@ -1739,6 +2018,763 @@ file_put_contents(
     {
         return (bool) preg_match('/\{\{[A-Z0-9_]+\}\}/', $s);
     }
+
+
+
+
+
+
+
+
+    private function extractAllowedTokensFromBase(string $basePath): array
+{
+    if (!file_exists($basePath)) return [];
+
+    $base = json_decode(file_get_contents($basePath), true);
+    if (!is_array($base)) return [];
+
+    $tokens = [];
+
+    $walk = function($node) use (&$walk, &$tokens) {
+        if (is_array($node)) {
+            foreach ($node as $v) $walk($v);
+            return;
+        }
+        if (is_string($node)) {
+            if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $node, $m)) {
+                foreach ($m[0] as $t) $tokens[$t] = true;
+            }
+        }
+    };
+
+    $walk($base);
+
+    // Orden estable (alfabético)
+    $list = array_keys($tokens);
+    sort($list);
+
+    return $list;
+}
+
+
+private function validateNoSpecialPlugins(array $widgetTypes): array
+{
+    // Permite solo widgets “core” típicos (ajústalo a tu gusto)
+    $allowedCore = [
+        'heading','text-editor','image','button','divider','spacer','icon','icon-list',
+        'image-box','icon-box','tabs','accordion','toggle','video','html','shortcode',
+        'menu-anchor','google_maps','social-icons','counter','testimonial',
+    ];
+
+    // Bloquea (Pro / Woo / etc.)
+    $blockedExact = [
+        'form','posts','portfolio','nav-menu','login','search-form',
+        'woocommerce-products','woocommerce-product','woocommerce-add-to-cart',
+        'woocommerce-cart','woocommerce-checkout','woocommerce-menu-cart',
+    ];
+
+    // Bloquea addons por prefijo
+    $blockedPrefixes = [
+        'jet-','uael-','premium-','bdt-','theplus-','elementskit-','qi-','ae-'
+    ];
+
+    $notAllowed = [];
+
+    foreach ($widgetTypes as $wt) {
+        $w = strtolower($wt);
+
+        if (in_array($w, $blockedExact, true)) {
+            $notAllowed[] = $wt;
+            continue;
+        }
+        foreach ($blockedPrefixes as $p) {
+            if (str_starts_with($w, $p)) {
+                $notAllowed[] = $wt;
+                continue 2;
+            }
+        }
+
+        // si quieres ser estricto: bloquea lo desconocido
+        if (!in_array($w, $allowedCore, true)) {
+            $notAllowed[] = $wt;
+        }
+    }
+
+    return array_values(array_unique($notAllowed));
+}
+private function countTokenizableFields(array $json, array $unsupportedSet): int
+{
+    $count = 0;
+
+    $walk = function($node) use (&$walk, &$count, $unsupportedSet) {
+        if (!is_array($node)) return;
+
+        if (($node['elType'] ?? null) === 'widget') {
+            $wt = strtolower((string)($node['widgetType'] ?? ''));
+
+            // ✅ si es widget especial → lo ignoramos (no cuenta)
+            if ($wt !== '' && isset($unsupportedSet[$wt])) {
+                return;
+            }
+
+            $settings = $node['settings'] ?? [];
+            if (is_array($settings)) {
+                if ($wt === 'heading') {
+                    if (!empty($settings['title']) && is_string($settings['title'])) $count++;
+                }
+
+                if ($wt === 'text-editor') {
+                    if (!empty($settings['editor']) && is_string($settings['editor'])) $count++;
+                }
+
+                if ($wt === 'button') {
+                    // texto
+                    if (!empty($settings['text']) && is_string($settings['text']) && !$this->isNumericOnlyString($settings['text'])) {
+                        $count++;
+                    } elseif (!empty($settings['button_text']) && is_string($settings['button_text']) && !$this->isNumericOnlyString($settings['button_text'])) {
+                        $count++;
+                    }
+
+                    // ❌ NO contar URL (se deja tal cual)
+                    // if (!empty($settings['link']['url'])) $count++;  <-- QUITAR
+                }
+            }
+        }
+
+        foreach (['elements','content'] as $k) {
+            if (!empty($node[$k]) && is_array($node[$k])) {
+                foreach ($node[$k] as $child) $walk($child);
+            }
+        }
+    };
+
+    $walk($json);
+    return $count;
+}
+private function tokenizeWithAllowedPool(
+    array $json,
+    array $allowedTokens,
+    array $unsupportedSet,
+    array &$usedTokens,
+    array &$metaOut
+): array
+
+{
+    $i = 0;
+    $metaOut = [];
+    $usedTokens = [];
+
+    $nextToken = function() use (&$i, $allowedTokens, &$usedTokens) {
+        if ($i >= count($allowedTokens)) return null;
+        $t = $allowedTokens[$i];
+        $i++;
+        $usedTokens[] = $t;
+        return $t;
+    };
+
+    $wrapIfHtml = function(string $original, string $token): string {
+        if (preg_match('/<[^>]+>/', $original)) return '<p>'.$token.'</p>';
+        return $token;
+    };
+
+    $walk = function($node) use (&$walk, $nextToken, $wrapIfHtml, $unsupportedSet) {
+        if (!is_array($node)) return $node;
+
+        if (($node['elType'] ?? null) === 'widget') {
+            $wt = strtolower((string)($node['widgetType'] ?? ''));
+
+            // ✅ Widget especial → copiar tal cual (no tocar settings)
+            if ($wt !== '' && isset($unsupportedSet[$wt])) {
+                // Igual recorre hijos si existieran (normalmente widgets no tienen, pero por seguridad)
+                foreach (['elements','content'] as $k) {
+                    if (!empty($node[$k]) && is_array($node[$k])) {
+                        foreach ($node[$k] as $idx => $child) {
+                            $node[$k][$idx] = $walk($child);
+                        }
+                    }
+                }
+                return $node;
+            }
+
+            $settings = $node['settings'] ?? [];
+
+            if (is_array($settings)) {
+                if ($wt === 'heading' && !empty($settings['title']) && is_string($settings['title'])) {
+
+                    // 🚫 No tokenizar títulos numéricos tipo "01"
+                    if (!$this->isNumericOnlyText($settings['title'])) {
+                        $t = $nextToken();
+                        if ($t) {
+                            $hs = strtolower((string)($settings['header_size'] ?? 'h3'));
+                            if (!in_array($hs, ['h1','h2','h3','h4','h5','h6'], true)) $hs = 'h3';
+
+                            $settings['title'] = $wrapIfHtml($settings['title'], $t);
+
+                            // meta del token (tag real)
+                            $metaOut[$t] = [
+                                'tag' => $hs,
+                                'widget' => 'heading',
+                                'field' => 'title',
+                            ];
+                        }
+                    }
+                }
+
+
+               if ($wt === 'text-editor' && !empty($settings['editor']) && is_string($settings['editor'])) {
+
+                    // 🚫 No tokenizar textos numéricos
+                    if (!$this->isNumericOnlyText($settings['editor'])) {
+                        $t = $nextToken();
+                        if ($t) {
+                            $settings['editor'] = $wrapIfHtml($settings['editor'], $t);
+
+                            $metaOut[$t] = [
+                                'tag' => 'p',
+                                'widget' => 'text-editor',
+                                'field' => 'editor',
+                            ];
+                        }
+                    }
+                }
+
+
+                if ($wt === 'button') {
+
+                    // Texto botón
+                    if (!empty($settings['text']) && is_string($settings['text'])) {
+                        if (!$this->isNumericOnlyText($settings['text'])) {
+                            $t = $nextToken();
+                            if ($t) {
+                                $settings['text'] = $wrapIfHtml($settings['text'], $t);
+                                $metaOut[$t] = ['tag'=>'span','widget'=>'button','field'=>'text'];
+                            }
+                        }
+                    } elseif (!empty($settings['button_text']) && is_string($settings['button_text'])) {
+                        if (!$this->isNumericOnlyText($settings['button_text'])) {
+                            $t = $nextToken();
+                            if ($t) {
+                                $settings['button_text'] = $wrapIfHtml($settings['button_text'], $t);
+                                $metaOut[$t] = ['tag'=>'span','widget'=>'button','field'=>'text'];
+                            }
+                        }
+                    }
+
+                    // URL botón: no tocar hashes
+                    if (!empty($settings['link']) && is_array($settings['link']) && !empty($settings['link']['url']) && is_string($settings['link']['url'])) {
+                        if (!$this->isAnchorOrHash($settings['link']['url'])) {
+                            $t = $nextToken();
+                            if ($t) {
+                                $settings['link']['url'] = $t;
+                                $metaOut[$t] = ['tag'=>'a','widget'=>'button','field'=>'url'];
+                            }
+                        }
+                    } elseif (!empty($settings['link']) && is_string($settings['link'])) {
+                        if (!$this->isAnchorOrHash($settings['link'])) {
+                            $t = $nextToken();
+                            if ($t) {
+                                $settings['link'] = $t;
+                                $metaOut[$t] = ['tag'=>'a','widget'=>'button','field'=>'url'];
+                            }
+                        }
+                    }
+                }
+
+
+                $node['settings'] = $settings;
+            }
+        }
+
+        // Recorrer hijos para secciones/columnas
+        foreach (['elements','content'] as $k) {
+            if (!empty($node[$k]) && is_array($node[$k])) {
+                foreach ($node[$k] as $idx => $child) {
+                    $node[$k][$idx] = $walk($child);
+                }
+            }
+        }
+
+        return $node;
+    };
+
+    return $walk($json);
+}
+
+
+
+
+
+
+private function buildTokenPoolMejorada(int $need): array
+{
+    $pool = [];
+
+    // Base fija (normal)
+    $fixed = [
+        '{{HERO_H1}}', '{{HERO_P}}',
+        '{{PACK_H2}}', '{{PACK_P}}',
+        '{{HERO_BTN_TEXT}}', '{{HERO_BTN_URL}}',
+        '{{PACK_BTN_TEXT}}', '{{PACK_BTN_URL}}',
+    ];
+    foreach ($fixed as $t) $pool[] = $t;
+
+    // También soporta variantes SHORT para microcopy
+    // (solo las que tienen sentido)
+    $fixedShort = [
+        '{{HERO_H1_SHORT}}', '{{HERO_P_SHORT}}',
+        '{{PACK_H2_SHORT}}', '{{PACK_P_SHORT}}',
+    ];
+    foreach ($fixedShort as $t) $pool[] = $t;
+
+    // Sections: Title/P normales + SHORT
+    $n = 1;
+    while (count($pool) < $need) {
+        $pool[] = '{{SECTION_'.$n.'_TITLE}}';
+        if (count($pool) >= $need) break;
+        $pool[] = '{{SECTION_'.$n.'_TITLE_SHORT}}';
+        if (count($pool) >= $need) break;
+
+        $pool[] = '{{SECTION_'.$n.'_P}}';
+        if (count($pool) >= $need) break;
+        $pool[] = '{{SECTION_'.$n.'_P_SHORT}}';
+        $n++;
+    }
+
+    return $pool;
+} 
+
+
+
+private function isNumericOnlyString(mixed $v): bool
+{
+    if (!is_string($v)) return false;
+    $s = trim($v);
+    if ($s === '') return false;
+    return preg_match('~^-?\d+(?:\.\d+)?$~', $s) === 1;
+}
+
+private function isUrlToken(string $token): bool
+{
+    // {{HERO_BTN_URL}} etc
+    return (bool) preg_match('~^\{\{[A-Z0-9_]+_URL\}\}$~', trim($token));
+}
+
+private function isNumericOnlyText(string $s): bool
+{
+    $t = trim(strip_tags($s));
+    if ($t === '') return false;
+
+    // "01", "1", "1.2", "1,2" (según tus plantillas)
+    return (bool) preg_match('~^\d+(?:[.,]\d+)?$~', $t);
+}
+
+private function isAnchorOrHash(string $url): bool
+{
+    $u = trim($url);
+    if ($u === '') return true;
+    // #contacto, #solicitar-precio, etc.
+    if (str_starts_with($u, '#')) return true;
+    return false;
+}
+
+private function metaPathForTokenized(string $tokenizedFileName): string
+{
+    $dir = storage_path('app/elementor/meta');
+    if (!is_dir($dir)) mkdir($dir, 0755, true);
+
+    $base = preg_replace('~\.json$~i', '', $tokenizedFileName);
+    return $dir . DIRECTORY_SEPARATOR . $base . '.meta.json';
+}
+
+
+
+
+private function scanWidgetTypes(array $json): array
+    {
+        $types = [];
+
+        $walk = function ($node) use (&$walk, &$types) {
+            if (!is_array($node)) return;
+
+            if (($node['elType'] ?? null) === 'widget') {
+                $wt = $node['widgetType'] ?? null;
+                if (is_string($wt) && $wt !== '') $types[$wt] = true;
+            }
+
+            foreach (['elements', 'content'] as $k) {
+                if (!empty($node[$k]) && is_array($node[$k])) {
+                    foreach ($node[$k] as $child) $walk($child);
+                }
+            }
+        };
+
+        $walk($json);
+
+        $list = array_keys($types);
+        sort($list);
+        return $list;
+    }
+
+    /**
+     * Set de widgets "especiales" (requieren plugins/pro/addons) => NO tokenizar, copiar tal cual.
+     */
+    private function getUnsupportedWidgetSet(array $widgetTypes): array
+    {
+        // Core permitidos (ajusta a tu gusto)
+        $allowedCore = [
+            'heading', 'text-editor', 'image', 'button', 'divider', 'spacer', 'icon', 'icon-list',
+            'image-box', 'icon-box', 'tabs', 'accordion', 'toggle', 'video', 'html', 'shortcode',
+            'menu-anchor', 'google_maps', 'social-icons', 'counter', 'testimonial',
+        ];
+
+        // Exactos típicos Pro/Woo/etc.
+        $blockedExact = [
+            'form', 'posts', 'portfolio', 'nav-menu', 'login', 'search-form',
+            'woocommerce-products', 'woocommerce-product', 'woocommerce-add-to-cart',
+            'woocommerce-cart', 'woocommerce-checkout', 'woocommerce-menu-cart',
+        ];
+
+        // Prefijos addons
+        $blockedPrefixes = [
+            'jet-', 'uael-', 'premium-', 'bdt-', 'theplus-', 'elementskit-', 'qi-', 'ae-',
+        ];
+
+        $unsupported = [];
+
+        foreach ($widgetTypes as $wt) {
+            $w = strtolower((string)$wt);
+
+            if (in_array($w, $blockedExact, true)) {
+                $unsupported[$w] = true;
+                continue;
+            }
+
+            foreach ($blockedPrefixes as $p) {
+                if (str_starts_with($w, $p)) {
+                    $unsupported[$w] = true;
+                    continue 2;
+                }
+            }
+
+            // Si quieres estricto: todo lo desconocido se considera especial
+            if (!in_array($w, $allowedCore, true)) {
+                $unsupported[$w] = true;
+            }
+        }
+
+        return $unsupported; // set: ['form'=>true, 'jet-...'=>true...]
+    }
+
+    // ============================================================
+    //  CONTEO DETALLADO (para pools separados)
+    // ============================================================
+    private function countTokenizableFieldsDetailed(array $json, array $unsupportedSet): array
+    {
+        $counts = [
+            'hero_h1' => 0,
+            'hero_p'  => 0,
+
+            'titles_long'  => 0,  // h2/h3/h4/...
+            'titles_short' => 0,  // p/span/div
+
+            'editors' => 0,
+
+            'btn_texts' => 0,
+            'btn_urls'  => 0,
+
+            'total' => 0,
+        ];
+
+        $seenHeroH1 = false;
+        $seenHeroP  = false;
+
+        $walk = function ($node) use (&$walk, &$counts, $unsupportedSet, &$seenHeroH1, &$seenHeroP) {
+            if (!is_array($node)) return;
+
+            if (($node['elType'] ?? null) === 'widget') {
+                $wt = strtolower((string)($node['widgetType'] ?? ''));
+
+                // ✅ widget especial → ignorar (no cuenta)
+                if ($wt !== '' && isset($unsupportedSet[$wt])) {
+                    return;
+                }
+
+                $settings = $node['settings'] ?? [];
+                if (is_array($settings)) {
+
+                    // HEADING
+                    if ($wt === 'heading' && !empty($settings['title']) && is_string($settings['title'])) {
+                        $plain = $this->plainText($settings['title']);
+
+                        // ✅ numeraciones no
+                        if (!$this->isNumericOnly($plain)) {
+                            $tag = $this->getHeadingTag($settings);
+
+                            if (!$seenHeroH1 && $tag === 'h1') {
+                                $counts['hero_h1']++;
+                                $seenHeroH1 = true;
+                            } else {
+                                if (in_array($tag, ['p', 'span', 'div'], true)) $counts['titles_short']++;
+                                else $counts['titles_long']++;
+                            }
+                        }
+                    }
+
+                    // TEXT EDITOR
+                    if ($wt === 'text-editor' && !empty($settings['editor']) && is_string($settings['editor'])) {
+                        $plain = $this->plainText($settings['editor']);
+
+                        // ✅ numeraciones no
+                        if (!$this->isNumericOnly($plain)) {
+                            if (!$seenHeroP) {
+                                $counts['hero_p']++;
+                                $seenHeroP = true;
+                            } else {
+                                $counts['editors']++;
+                            }
+                        }
+                    }
+
+                    // BUTTON
+                    if ($wt === 'button') {
+                        $txt = $settings['text'] ?? $settings['button_text'] ?? null;
+                        if (is_string($txt) && trim($txt) !== '') {
+                            $plain = $this->plainText($txt);
+                            if (!$this->isNumericOnly($plain)) $counts['btn_texts']++;
+                        }
+
+                        $link = $settings['link'] ?? null;
+                        if (is_array($link) && !empty($link['url']) && is_string($link['url'])) {
+                            $counts['btn_urls']++;
+                        } elseif (is_string($link) && trim($link) !== '') {
+                            $counts['btn_urls']++;
+                        }
+                    }
+                }
+            }
+
+            foreach (['elements', 'content'] as $k) {
+                if (!empty($node[$k]) && is_array($node[$k])) {
+                    foreach ($node[$k] as $child) $walk($child);
+                }
+            }
+        };
+
+        $walk($json);
+
+        $counts['total'] =
+            $counts['hero_h1'] + $counts['hero_p'] +
+            $counts['titles_long'] + $counts['titles_short'] +
+            $counts['editors'] + $counts['btn_texts'] + $counts['btn_urls'];
+
+        return $counts;
+    }
+
+    // ============================================================
+    //  POOLS SEPARADOS (NO se cruzan)
+    // ============================================================
+    private function buildTokenPoolsMejorada(array $counts): array
+    {
+        $pool = [
+            'hero_h1' => ['{{HERO_H1}}'],
+            'hero_p'  => ['{{HERO_P}}'],
+
+            // Botones: primero tus fijos
+            'btn_texts' => ['{{HERO_BTN_TEXT}}', '{{PACK_BTN_TEXT}}'],
+            'btn_urls'  => ['{{HERO_BTN_URL}}',  '{{PACK_BTN_URL}}'],
+
+            'titles_long'  => [],
+            'titles_short' => [],
+            'editors'      => [],
+        ];
+
+        // Completar BTN_TEXT_n y BTN_URL_n si hace falta
+        while (count($pool['btn_texts']) < (int)($counts['btn_texts'] ?? 0)) {
+            $pool['btn_texts'][] = '{{BTN_TEXT_' . (count($pool['btn_texts']) + 1) . '}}';
+        }
+        while (count($pool['btn_urls']) < (int)($counts['btn_urls'] ?? 0)) {
+            $pool['btn_urls'][] = '{{BTN_URL_' . (count($pool['btn_urls']) + 1) . '}}';
+        }
+
+        // Titles largos (h2/h3/..)
+        $nLong = 1;
+        while (count($pool['titles_long']) < (int)($counts['titles_long'] ?? 0)) {
+            $pool['titles_long'][] = '{{SECTION_' . $nLong . '_TITLE}}';
+            $nLong++;
+        }
+
+        // Titles cortos (p/span/div) => un token distinto (para generar 1-3 palabras después)
+        $nShort = 1;
+        while (count($pool['titles_short']) < (int)($counts['titles_short'] ?? 0)) {
+            $pool['titles_short'][] = '{{SECTION_SHORT_' . $nShort . '_TITLE}}';
+            $nShort++;
+        }
+
+        // Text editors (párrafos)
+        $nP = 1;
+        while (count($pool['editors']) < (int)($counts['editors'] ?? 0)) {
+            $pool['editors'][] = '{{SECTION_' . $nP . '_P}}';
+            $nP++;
+        }
+
+        return $pool;
+    }
+
+    // ============================================================
+    //  TOKENIZAR (respeta pools + números + especiales)
+    // ============================================================
+    private function tokenizeWithPools(array $json, array $pools, array $unsupportedSet, array &$usedTokens): array
+    {
+        $usedTokens = [];
+
+        $idx = [
+            'hero_h1' => 0,
+            'hero_p'  => 0,
+            'titles_long'  => 0,
+            'titles_short' => 0,
+            'editors' => 0,
+            'btn_texts' => 0,
+            'btn_urls'  => 0,
+        ];
+
+        $next = function (string $key) use (&$idx, $pools, &$usedTokens) {
+            if (!isset($pools[$key])) return null;
+
+            $i = (int)($idx[$key] ?? 0);
+            if ($i >= count($pools[$key])) return null;
+
+            $t = $pools[$key][$i];
+            $idx[$key] = $i + 1;
+
+            $usedTokens[] = $t;
+            return $t;
+        };
+
+        $walk = function ($node) use (&$walk, $unsupportedSet, $next) {
+            if (!is_array($node)) return $node;
+
+            if (($node['elType'] ?? null) === 'widget') {
+                $wt = strtolower((string)($node['widgetType'] ?? ''));
+
+                // ✅ Widget especial → copiar tal cual
+                if ($wt !== '' && isset($unsupportedSet[$wt])) {
+                    return $node;
+                }
+
+                $settings = $node['settings'] ?? [];
+                if (is_array($settings)) {
+
+                    // ---------- HEADING ----------
+                    if ($wt === 'heading' && !empty($settings['title']) && is_string($settings['title'])) {
+                        $plain = $this->plainText($settings['title']);
+
+                        // ✅ no tokenizar numeraciones
+                        if (!$this->isNumericOnly($plain)) {
+                            $tag = $this->getHeadingTag($settings);
+
+                            // h1 => HERO_H1 (1 vez)
+                            if ($tag === 'h1') {
+                                $t = $next('hero_h1');
+                                if ($t) $settings['title'] = $t; // ❗sin <p>
+                            } else {
+                                $bucket = in_array($tag, ['p', 'span', 'div'], true) ? 'titles_short' : 'titles_long';
+                                $t = $next($bucket);
+                                if ($t) $settings['title'] = $t; // ❗sin <p>
+                            }
+                        }
+                    }
+
+                    // ---------- TEXT EDITOR ----------
+                    if ($wt === 'text-editor' && !empty($settings['editor']) && is_string($settings['editor'])) {
+                        $plain = $this->plainText($settings['editor']);
+
+                        if (!$this->isNumericOnly($plain)) {
+                            // HERO_P: primer text-editor
+                            $tHero = $next('hero_p');
+                            if ($tHero) {
+                                $settings['editor'] = '<p>' . $tHero . '</p>'; // ✅ HTML válido
+                            } else {
+                                $t = $next('editors');
+                                if ($t) $settings['editor'] = '<p>' . $t . '</p>'; // ✅ HTML válido
+                            }
+                        }
+                    }
+
+                    // ---------- BUTTON ----------
+                    if ($wt === 'button') {
+                        // Texto
+                        $textKey = null;
+                        if (!empty($settings['text']) && is_string($settings['text'])) $textKey = 'text';
+                        elseif (!empty($settings['button_text']) && is_string($settings['button_text'])) $textKey = 'button_text';
+
+                        if ($textKey) {
+                            $plain = $this->plainText($settings[$textKey]);
+                            if (!$this->isNumericOnly($plain)) {
+                                $t = $next('btn_texts');
+                                if ($t) $settings[$textKey] = $t; // ❗sin <p>
+                            }
+                        }
+
+                        // URL
+                        if (!empty($settings['link']) && is_array($settings['link']) && !empty($settings['link']['url']) && is_string($settings['link']['url'])) {
+                            $t = $next('btn_urls');
+                            if ($t) $settings['link']['url'] = $t;
+                        } elseif (!empty($settings['link']) && is_string($settings['link'])) {
+                            $t = $next('btn_urls');
+                            if ($t) $settings['link'] = $t;
+                        }
+                    }
+
+                    $node['settings'] = $settings;
+                }
+            }
+
+            // Recorrer hijos (sections/columns/etc.)
+            foreach (['elements', 'content'] as $k) {
+                if (!empty($node[$k]) && is_array($node[$k])) {
+                    foreach ($node[$k] as $i => $child) {
+                        $node[$k][$i] = $walk($child);
+                    }
+                }
+            }
+
+            return $node;
+        };
+
+        return $walk($json);
+    }
+
+    // ============================================================
+    //  HELPERS
+    // ============================================================
+    private function getHeadingTag(array $settings): string
+    {
+        // Elementor usual: header_size = h1/h2/h3/p/span...
+        $tag = strtolower((string)($settings['header_size'] ?? $settings['tag'] ?? ''));
+        if ($tag === '') $tag = 'h2'; // fallback
+        return $tag;
+    }
+
+   
+
+
+
+    private function plainTextLen(string $s): int
+{
+    $s = trim((string)$s);
+    if ($s === '') return 0;
+
+    // quita tags y entidades típicas
+    $s = html_entity_decode($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $s = strip_tags($s);
+    $s = preg_replace('~\s+~u', ' ', $s);
+    $s = trim($s);
+
+    return mb_strlen($s);
+}
+
+
+
 }
 
 

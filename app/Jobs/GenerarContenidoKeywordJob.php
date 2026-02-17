@@ -15,6 +15,8 @@ use Illuminate\Support\Facades\Cache;
 use App\Models\DominiosModel;
 use App\Models\Dominios_Contenido_DetallesModel;
 
+use Illuminate\Support\Facades\Storage\Log;
+
 class GenerarContenidoKeywordJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
@@ -95,6 +97,7 @@ class GenerarContenidoKeywordJob implements ShouldQueue
             if ($apiKey === '') throw new \RuntimeException('NO_RETRY: DEEPSEEK_API_KEY no configurado');
 
             [$tpl, $tplPath] = $this->loadElementorTemplateForDomainWithPath((int) $this->idDominio);
+          $meta = $this->loadOrInferTemplateMeta($tplPath, $tpl);
 
             $tokensMeta = $this->collectTokensMeta($tpl);
             if (empty($tokensMeta)) {
@@ -129,8 +132,9 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             for ($cycle = 1; $cycle <= 2; $cycle++) {
                 $brief = $this->creativeBrief();
-                $seed = $this->stableSeedInt((string) $this->jobUuid . '|' . (int) $this->registroId . "|cycle={$cycle}");
-                $themePlan = $this->buildThemePlan($seed, 40, 26);
+               $seed = $this->stableSeedInt((string) $this->jobUuid . '|' . (int) $this->registroId . "|cycle={$cycle}");
+                $sectionsNeeded = $this->inferSectionsFromTokens($tokensMeta, 26, 120);
+                $themePlan = $this->buildThemePlan($seed, $sectionsNeeded);
 
                 $values = $this->generateValuesForTemplateTokensBatched(
                     apiKey: $apiKey,
@@ -185,10 +189,67 @@ class GenerarContenidoKeywordJob implements ShouldQueue
 
             if (!is_array($finalValues)) throw new \RuntimeException('No se pudo generar valores finales');
 
+            // ====== APLICAR META: headings/labels cortos + NO tocar números ======
+                $templateMeta = $this->loadOrInferTemplateMeta($tplPath, $tpl);
+                $templateMeta = $this->normalizeMetaKeys($templateMeta);
+
+                // Ajusta textos según tag (p/span cortos)
+                foreach ($finalValues as $k => $v) {
+                    $k = (string)$k;
+                    $val = $this->toStr($v);
+
+                    // 🚫 si el valor es sólo número, NO lo modifiques
+                    if ($this->isNumericOnlyText($val)) {
+                        $finalValues[$k] = $val;
+                        continue;
+                    }
+
+                    // ✅ NO recortar títulos globales por meta de plantilla (aquí se te dañan)
+                    if (in_array($k, ['SEO_TITLE','HERO_H1'], true)) {
+                        $finalValues[$k] = $val;
+                        continue;
+                    }
+
+                    // ✅ aplica meta solo si existe para ese token
+                    if (!preg_match('~^SECTION_\d+_TITLE_SHORT$~', $k) && isset($templateMeta[$k])) {
+                        $finalValues[$k] = $this->shortenByMeta($k, $val, $templateMeta);
+                    }
+                }
             [$filled, $replacedCount, $remainingTokens] = $this->fillTemplateTokensWithStats($tpl, $finalValues);
+                        $defaultsUrl = [
+                '{{HERO_BTN_URL}}' => $dominio->url ?? '#',
+                '{{PACK_BTN_URL}}' => $dominio->url ?? '#',
+            ];
+
+            // Aplica URLs desde meta tokens sin romper Elementor
+            $this->applyUrlTokensFromMeta($filled, $finalValues, $defaultsUrl);
 
             if ($replacedCount < 1) throw new \RuntimeException("NO_RETRY: No se reemplazó ningún token. Template: {$tplPath}");
-            if (!empty($remainingTokens)) throw new \RuntimeException("NO_RETRY: Tokens sin reemplazar: " . implode(' | ', array_slice($remainingTokens, 0, 120)));
+                    if (!empty($remainingTokens)) {
+                // relleno automático: vacío o fallback
+                $cleanup = [];
+                foreach ($remainingTokens as $t) {
+                    // "{{TOKEN}}" -> "TOKEN"
+                    if (preg_match('~^\{\{([A-Z0-9_]+)\}\}$~', $t, $m)) {
+                        $key = $m[1];
+                        $cleanup[$key] = ''; // o fallback si quieres
+                    }
+                }
+
+                if (!empty($cleanup)) {
+                    [$filled2, $rc2, $rem2] = $this->fillTemplateTokensWithStats($filled, $cleanup);
+                    $filled = $filled2;
+                    $remainingTokens = $rem2;
+                }
+
+                // ya NO matamos el job
+                \Log::warning('Tokens aún presentes (se limpiaron)', [
+                    'tokens' => array_slice($remainingTokens, 0, 80),
+                    'dominio' => $this->idDominio,
+                    'detalle' => $this->detalleId,
+                ]);
+            }
+
             
               // 1) Candidatos (en orden). Si no hay SEO_TITLE/H1, usa el primer H2 (SECTION_1_TITLE)
                $seo  = trim(strip_tags($this->toStr($finalValues['SEO_TITLE'] ?? '')));
@@ -212,11 +273,11 @@ class GenerarContenidoKeywordJob implements ShouldQueue
                 }
 
                 // Limpieza SUAVE (sin fallback genérico)
-                $title = trim(preg_replace('~\s+~u', ' ', strip_tags($titleCandidate)));
+                $title = $this->sanitizeTitle($titleCandidate, $source === 'SEO' ? 'SEO_TITLE' : 'HERO_H1');
 
-                // ✅ SOLO recorta si viene de SEO_TITLE
-                if ($source === 'SEO') {
-                    $title = $this->smartTruncateTitle($title, 60);
+                // si vino de H2, NO recortes por chars, solo sanea
+                if ($source === 'H2') {
+                    $title = trim(preg_replace('~\s+~u', ' ', strip_tags($title)));
                 }
 
                 // Si por algo queda vacío, usa H2 completo (sin recorte)
@@ -383,40 +444,49 @@ HTML
     {
         $meta = []; // TOKEN => ['type' => 'plain'|'editor', 'wrap_p' => bool]
 
-        $walk = function ($node) use (&$walk, &$meta) {
+        $walk = function ($node, $parentKey = '') use (&$walk, &$meta) {
             if (!is_array($node)) return;
 
             foreach ($node as $k => $v) {
-                if (is_string($k) && in_array($k, ['editor','title','text'], true) && is_string($v) && str_contains($v, '{{')) {
+                $kStr = is_string($k) ? $k : (string)$k;
+
+                // ✅ si el valor es string y contiene tokens, los detectamos SIN importar la key
+                if (is_string($v) && str_contains($v, '{{')) {
                     if (preg_match_all('/\{\{([A-Z0-9_]+)\}\}/', $v, $m)) {
                         foreach (($m[1] ?? []) as $tok) {
                             $tok = (string)$tok;
                             if ($tok === '') continue;
 
-                            $type  = ($k === 'editor') ? 'editor' : 'plain';
-                            $wrapP = (bool) preg_match('~<p>\s*\{\{' . preg_quote($tok, '~') . '\}\}\s*</p>~i', $v);
+                            // Regla: solo "editor" se trata como HTML; todo lo demás plain
+                            $type = ($kStr === 'editor') ? 'editor' : 'plain';
 
-                            if (!isset($meta[$tok])) {
-                                $meta[$tok] = ['type' => $type, 'wrap_p' => $wrapP];
-                            } else {
-                                if ($type === 'editor') $meta[$tok]['type'] = 'editor';
-                                $meta[$tok]['wrap_p'] = $meta[$tok]['wrap_p'] || $wrapP;
-                            }
+                            // Detectar si el token está envuelto en <p>{{TOKEN}}</p>
+                            $wrapP = (bool) preg_match(
+                                '~<p>\s*\{\{' . preg_quote($tok, '~') . '\}\}\s*</p>~i',
+                                $v
+                            );
+
+                        if (!isset($meta[$tok])) {
+                            $meta[$tok] = ['type' => $type, 'wrap_p' => $wrapP];
+                        } else {
+                            if ($type === 'editor') $meta[$tok]['type'] = 'editor';
+                            $meta[$tok]['wrap_p'] = $meta[$tok]['wrap_p'] || $wrapP;
                         }
                     }
                 }
-
-                if (is_array($v)) $walk($v);
             }
-        };
 
-        $walk($tpl);
-        ksort($meta);
-        return $meta;
-    }
+            if (is_array($v)) $walk($v, $kStr);
+        }
+    };
+
+    $walk($tpl);
+    ksort($meta);
+    return $meta;
+}
 
     // ========================= GENERACIÓN BATCH =========================
-   private function generateValuesForTemplateTokensBatched(
+ private function generateValuesForTemplateTokensBatched(
     string $apiKey,
     string $model,
     array $tokensMeta,
@@ -443,10 +513,12 @@ HTML
     $variation = "seed={$seed}|job=" . substr($this->jobUuid, 0, 8) . "|rid=" . (int)$this->registroId;
 
     foreach ($chunks as $chunkKeys) {
+        // ---- schema
         $skeleton = [];
         foreach ($chunkKeys as $k) $skeleton[$k] = "";
         $schemaJson = json_encode($skeleton, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
+        // ---- separar editor/plain (esto lo usas en tu prompt)
         $plainKeys = [];
         $editorKeys = [];
         foreach ($chunkKeys as $k) {
@@ -459,29 +531,67 @@ HTML
         $briefCTA   = $this->toStr($brief['cta'] ?? '');
         $briefAud   = $this->toStr($brief['audience'] ?? '');
 
+        // ---- ya generados (para evitar repetición)
         $alreadySectionTitles = [];
         foreach ($values as $kk => $vv) {
             if (preg_match('~^SECTION_\d+_TITLE$~', (string)$kk)) {
+                $alreadySectionTitles[] = trim(strip_tags($this->toStr($vv)));
+            }
+            if (preg_match('~^SECTION_\d+_TITLE_SHORT$~', (string)$kk)) {
                 $alreadySectionTitles[] = trim(strip_tags($this->toStr($vv)));
             }
         }
         $alreadySectionTitles = array_slice(array_filter($alreadySectionTitles), 0, 20);
         $alreadyStr = implode(' | ', $alreadySectionTitles);
 
-        // Plan guía interna
-        $planLines = [];
-        for ($i=1; $i<=26; $i++) $planLines[] = "SECTION_{$i}: " . ($themePlan[$i] ?? 'Tema');
-        $planText = implode("\n", $planLines);
+        // ---- plan (lo dejas igual)
+       $planText = $this->themePlanToText($themePlan);
 
         $editorList = implode(', ', $editorKeys);
         $plainList  = implode(', ', $plainKeys);
 
         $plantillaPrompt = $this->obtenerAjuste('deepseek_prompt_global', '');
-
         if ($plantillaPrompt === '') {
             throw new \RuntimeException('NO_RETRY: No hay prompt global configurado en ajustes (deepseek_prompt_global).');
         }
 
+        // ✅ REGLAS EXTRA INYECTADAS (aunque el prompt global no las tenga)
+        // Esto NO rompe tu prompt, solo lo refuerza.
+        $rules = [];
+        foreach ($chunkKeys as $k) {
+            $k = (string)$k;
+
+            if (preg_match('~^SECTION_\d+_TITLE_SHORT$~', $k)) {
+                $rules[] = "- {$k}: EXACTO 2–4 palabras. SIN punto. SIN dos puntos. SIN comillas. NO vacío.";
+                continue;
+            }
+            if (preg_match('~^SECTION_\d+_P_SHORT$~', $k)) {
+                $rules[] = "- {$k}: 1–6 palabras máximo, microcopy, sin punto final.";
+                continue;
+            }
+
+            if (preg_match('~^SECTION_\d+_TITLE$~', $k)) {
+                $rules[] = "- {$k}: 4–9 palabras (título).";
+                continue;
+            }
+            if (preg_match('~^SECTION_\d+_P$~', $k)) {
+                $rules[] = "- {$k}: 2–4 frases, no demasiado corto, sin listas largas.";
+                continue;
+            }
+
+            if (preg_match('~^(HERO|PACK)_BTN_TEXT$~', $k) || preg_match('~^BTN_\d+_TEXT$~', $k)) {
+                $rules[] = "- {$k}: 1–4 palabras (botón/CTA), imperativo, corto.";
+                continue;
+            }
+
+            if (preg_match('~^(HERO|PACK)_BTN_URL$~', $k) || preg_match('~^BTN_\d+_URL$~', $k)) {
+                $rules[] = "- {$k}: URL válida (string). Si no hay, usa '#'.";
+                continue;
+            }
+        }
+        $rulesText = implode("\n", array_values(array_unique($rules)));
+
+        // ✅ Variables para tu prompt global
         $variables = [
             'variation' => $variation,
             'keyword' => $this->keyword,
@@ -503,9 +613,17 @@ HTML
             'plain_list' => $plainList,
 
             'schema_json' => $schemaJson,
+
+            // ✅ NUEVO: si tu prompt global no lo usa, igual lo anexamos abajo
+            'rules_text' => $rulesText,
         ];
 
-$prompt = $this->renderizarPrompt($plantillaPrompt, $variables);
+        $prompt = $this->renderizarPrompt($plantillaPrompt, $variables);
+
+        // ✅ Blindaje: si el prompt global NO tiene {{RULES_TEXT}}, igual lo agregamos al final
+        if (!str_contains($prompt, $rulesText) && trim($rulesText) !== '') {
+            $prompt .= "\n\nREGLAS POR TOKEN:\n" . $rulesText . "\n";
+        }
 
         $raw = $this->deepseekText(
             $apiKey,
@@ -528,17 +646,31 @@ $prompt = $this->renderizarPrompt($plantillaPrompt, $variables);
 
             $rawVal = $this->toStr($arr[$k] ?? '');
 
-            // Si vino vacío desde origen => regen batch
             if (trim(strip_tags($rawVal)) === '') {
                 $missing[] = $k;
                 continue;
             }
 
-            $val = $this->normalizeValueByTokenMeta($rawVal, $meta);
+            // ✅ Normaliza, pero respeta SHORT (no los alargues, solo limpia)
+           $rawVal = $this->hardCleanValue($rawVal);
 
-            // Si se vació por limpieza/ruido => fallback directo (NO regen)
+            $val = $this->normalizeValueByTokenMeta($rawVal, $meta);
+            // ✅ Si el valor es malo (corto, genérico, con [CTA], tech-stack, etc) => regen
+            if ($this->valueLooksBad($k, $val)) {
+                $missing[] = $k;
+                continue;
+            }
+            $val = $this->hardCleanValue($val);
+
+            // si vacío -> regen
             if ($this->isEmptyValue($val)) {
-                $values[$k] = $this->fallbackForToken($k, $meta, $seed + 777, $themePlan, true);
+                $missing[] = $k;
+                continue;
+            }
+
+            // si incoherente / plan / basura / muy corto -> regen
+            if ($this->valueLooksBad($k, $val)) {
+                $missing[] = $k;
                 continue;
             }
 
@@ -567,9 +699,15 @@ $prompt = $this->renderizarPrompt($plantillaPrompt, $variables);
                 $meta = $tokensMeta[$k] ?? ['type' => 'plain', 'wrap_p' => false];
 
                 $tmp = $this->toStr($regen[$k] ?? '');
+                $tmp = $this->hardCleanValue($tmp);
                 $tmp = $this->normalizeValueByTokenMeta($tmp, $meta);
+                if ($this->valueLooksBad($k, $tmp)) {
+                    $tmp = ''; // fuerza fallback abajo
+                }
+                $tmp = $this->hardCleanValue($tmp);
 
-                if ($this->isEmptyValue($tmp)) {
+                // si sigue mal tras IA -> fallback, pero NO boilerplate
+                if ($this->isEmptyValue($tmp) || $this->valueLooksBad($k, $tmp)) {
                     $tmp = $this->fallbackForToken($k, $meta, $seed + 777, $themePlan, true);
                 }
 
@@ -578,85 +716,152 @@ $prompt = $this->renderizarPrompt($plantillaPrompt, $variables);
         }
     }
 
-    // Anti-duplicados simples en párrafos
-    $seen = [];
-    foreach ($values as $k => $v) {
-        if (!preg_match('~^SECTION_(\d+)_P$~', (string)$k)) continue;
+    // Anti-duplicados (SECTION titles + paragraphs)
+$seen = [];
+foreach ($values as $k => $v) {
+    $kStr = (string)$k;
 
-        $plain = mb_strtolower(trim(strip_tags($this->toStr($v))));
-        if ($plain === '') continue;
+    if (!preg_match('~^SECTION_(\d+)_(TITLE|P)(_SHORT)?$~', $kStr, $m)) continue;
 
-        if (isset($seen[$plain])) {
-            $values[$k] = $this->fallbackForToken(
-                (string)$k,
-                $tokensMeta[$k] ?? ['type'=>'editor','wrap_p'=>false],
-                $seed + 77,
-                $themePlan,
-                true
-            );
-        } else {
-            $seen[$plain] = true;
-        }
+    $plain = mb_strtolower(trim(strip_tags($this->toStr($v))));
+    if ($plain === '') continue;
+
+    $plain = preg_replace('~\s+~u', ' ', $plain);
+
+    // Si ya lo vimos, fuerza fallback diferente
+    if (isset($seen[$plain])) {
+        $values[$kStr] = $this->fallbackForToken(
+            $kStr,
+            $tokensMeta[$kStr] ?? ['type'=>'plain','wrap_p'=>false],
+            $seed + 77 + (int)($m[1] ?? 0),
+            $themePlan,
+            true
+        );
+    } else {
+        $seen[$plain] = true;
     }
+}
+
 
     return $values;
 }
 
 
 
-    private function tokenRank(string $k): int
-    {
-        // ✅ tokens críticos primero
-        if (in_array($k, ['SEO_TITLE','HERO_H1','KIT_H1','PRICE_H2','CLIENTS_LABEL','TESTIMONIOS_TITLE'], true)) return 0;
 
-        if (preg_match('~^SECTION_\d+_TITLE$~', $k)) return 20;
-        if (preg_match('~^SECTION_\d+_P$~', $k)) return 30;
-        return 10;
-    }
+    private function tokenRank(string $k): int
+{
+    // críticos primero
+    if (in_array($k, ['SEO_TITLE','HERO_H1','KIT_H1','PRICE_H2','CLIENTS_LABEL','TESTIMONIOS_TITLE'], true)) return 0;
+
+    // SHORT primero que los normales (para que no queden sin contenido)
+    if (preg_match('~^SECTION_\d+_TITLE_SHORT$~', $k)) return 15;
+    if (preg_match('~^SECTION_\d+_P_SHORT$~', $k))     return 16;
+
+    if (preg_match('~^SECTION_\d+_TITLE$~', $k)) return 20;
+    if (preg_match('~^SECTION_\d+_P$~', $k))     return 30;
+
+    // botones
+    if (preg_match('~^(HERO|PACK)_BTN_TEXT$~', $k)) return 5;
+    if (preg_match('~^BTN_\d+_TEXT$~', $k)) return 6;
+    // CONT_x_H2 (titulares dentro de contenido)
+if (preg_match('~^CONT_\d+_H2$~', $k)) return 18;
+
+// CONT_x_P (párrafos dentro de contenido)
+if (preg_match('~^CONT_\d+_P$~', $k))  return 28;
+
+// (opcional) CONT_x_TITLE / CONT_x_TITLE_SHORT si algún día existen
+if (preg_match('~^CONT_\d+_TITLE_SHORT$~', $k)) return 15;
+if (preg_match('~^CONT_\d+_TITLE$~', $k))       return 20;
+
+    return 10;
+}
 
     // ========================= THEME PLAN =========================
-    private function buildThemePlan(int $seed, int $poolSize = 40, int $sections = 26): array
+   private function buildThemePlan(int $seed, int $sections = 26): array
 {
-    $pool = [
-        "Propuesta de valor (qué ganas y por qué ahora)",
-        "Beneficio principal (resultado tangible)",
-        "Beneficios secundarios (comodidad, ahorro, seguridad, rapidez)",
-        "Cómo funciona (pasos simples)",
-        "Qué incluye el servicio (alcance/entregables)",
-        "Para quién es ideal (casos de uso)",
-        "Cuándo conviene elegirlo (situaciones típicas)",
-        "Diferenciadores (por qué nosotros vs alternativas)",
-        "Calidad y estándares (cómo aseguramos el resultado)",
-        "Tiempos / disponibilidad / planificación",
-        "Opciones o modalidades (según necesidad)",
-        "Personalización (adaptado al cliente)",
-        "Errores comunes al elegir (y cómo evitarlos)",
-        "Objeción: precio (valor vs coste)",
-        "Objeción: confianza (garantías realistas)",
-        "Objeción: rapidez (qué esperar)",
-        "Soporte y comunicación (cómo te atendemos)",
-        "Checklist antes de empezar (qué necesitas)",
-        "Proceso detallado (lo que ocurre en cada etapa)",
-        "Casos típicos / ejemplos (sin inventar datos)",
-        "Preguntas frecuentes clave",
-        "CTA principal (siguiente paso claro)",
-        "CTA alternativa (si no está listo)",
-        "Recomendaciones para obtener mejor resultado",
-        "Cierre comercial (refuerzo de confianza)",
-        "Resumen de ventajas (bullet mental)",
-        "Comparativa suave (sin atacar competencia)",
-        "Seguridad / políticas / cumplimiento (si aplica)",
-        "Experiencia del cliente (lo que suele valorar)",
-        "Optimización continua (mejora / seguimiento)",
+    $topics = [
+        "Propuesta de valor",
+        "Beneficio principal",
+        "Beneficios secundarios",
+        "Cómo funciona",
+        "Qué incluye",
+        "Para quién es ideal",
+        "Cuándo conviene elegirlo",
+        "Diferenciadores",
+        "Calidad y estándares",
+        "Tiempos / disponibilidad",
+        "Opciones o modalidades",
+        "Personalización",
+        "Errores comunes al elegir",
+        "Objeción: precio",
+        "Objeción: confianza",
+        "Objeción: rapidez",
+        "Soporte y comunicación",
+        "Checklist antes de empezar",
+        "Proceso detallado",
+        "Casos típicos / ejemplos",
+        "Preguntas frecuentes",
+        "CTA principal",
+        "CTA alternativa",
+        "Recomendaciones",
+        "Cierre comercial",
+        "Resumen de ventajas",
+        "Comparativa suave",
+        "Seguridad / cumplimiento",
+        "Experiencia del cliente",
+        "Optimización continua",
     ];
 
-    $pool = $this->shuffleDeterministic($pool, $seed);
-    $pool = array_slice($pool, 0, max($sections, min($poolSize, count($pool))));
+    $formats = [
+        "bullets",
+        "pasos",
+        "checklist",
+        "mini-caso",
+        "pregunta-respuesta",
+        "mito-vs-realidad",
+        "antes-despues",
+        "comparativa",
+        "puntos-clave",
+        "objecion-respuesta",
+    ];
+
+    $angles = [
+        "orientado a resultado",
+        "orientado a ahorro de tiempo",
+        "orientado a reducción de riesgo",
+        "orientado a facilidad",
+        "orientado a confianza",
+        "para un caso común",
+        "para un perfil específico",
+        "para un escenario urgente",
+        "para quien compara alternativas",
+        "para quien ya lo intentó y falló",
+    ];
+
+    // Mantener determinismo con tu función actual
+    $topics  = $this->shuffleDeterministic($topics,  $seed);
+    $formats = $this->shuffleDeterministic($formats, $seed + 101);
+    $angles  = $this->shuffleDeterministic($angles,  $seed + 202);
 
     $plan = [];
-    for ($i=1; $i<=$sections; $i++) {
-        $plan[$i] = $pool[($i-1) % count($pool)] ?? "Tema {$i}";
+    $t = count($topics);
+    $f = count($formats);
+    $a = count($angles);
+
+    for ($i = 1; $i <= $sections; $i++) {
+        // índices “mezclados” para evitar ciclos obvios
+        $ti = ($i * 7  + $seed) % $t;
+        $fi = ($i * 11 + $seed) % $f;
+        $ai = ($i * 13 + $seed) % $a;
+
+        $plan[$i] = [
+            'topic'  => $topics[$ti],
+            'format' => $formats[$fi],
+            'angle'  => $angles[$ai],
+        ];
     }
+
     return $plan;
 }
 
@@ -902,10 +1107,11 @@ PROMPT;
     $clean = preg_replace('~</strong>\s*([A-Za-zÁÉÍÓÚÑÜáéíóúñü¿¡])~u', '</strong> $1', (string)$clean);
 
     // Limita exceso de <br> (máximo 2)
-    if (substr_count($clean, '<br>') > 2) {
+   // Permite hasta 4 <br> (no mutila párrafos buenos)
+    if (substr_count($clean, '<br>') > 4) {
         $parts = explode('<br>', $clean);
-        $keep  = array_slice($parts, 0, 3);   // deja 2 <br> (3 partes)
-        $rest  = array_slice($parts, 3);
+        $keep  = array_slice($parts, 0, 5); // deja 4 <br>
+        $rest  = array_slice($parts, 5);
         $clean = implode('<br>', $keep) . (count($rest) ? ' ' . implode('. ', array_map('trim', $rest)) : '');
     }
 
@@ -919,6 +1125,9 @@ PROMPT;
 
     // Quita esta frase si llegara (por si acaso)
     $clean = preg_replace('~Texto\s+preparado\s+para\s+publicar.*$~iu', '', (string)$clean);
+
+    $clean = preg_replace('~^\s*\+\s+~u', '', (string)$clean);
+    $clean = preg_replace('~(?mi)^\s*\+\s+.*$~u', '', (string)$clean);
 
     return trim((string)$clean); // puede ser ''
 }
@@ -990,24 +1199,71 @@ private function fallbackForToken(
         return $t;
     }
 
-    // ✅ PARRAFOS DE SECCION: naturales, sin plantillas, sin "(bloque i)"
-    if (preg_match('~^SECTION_(\d+)_P$~', $tok, $m)) {
-        $i = (int)($m[1] ?? 1);
+    // ✅ TITLE_SHORT: etiquetas cortas (1–3 palabras)
+    if (preg_match('~^SECTION_(\d+)_TITLE_SHORT$~', $tok, $m)) {
+        $kw = $this->shortKw();
 
         $opts = [
-            "Para que {$kw} funcione bien, lo primero es entender el objetivo: qué quieres que sienta el cliente y qué comportamiento buscas (más tiempo, mejor percepción o una experiencia más coherente). Con eso claro, se elige una opción que encaje con tu espacio y se ajusta la intensidad para que sea agradable, no invasiva.",
-            "La clave de {$kw} está en el ajuste: no es solo elegir algo bonito, sino definir dónde se percibe, con qué intensidad y en qué momentos. Un buen trabajo evita saturación, mantiene consistencia y deja una sensación natural que acompaña la experiencia sin distraer.",
-            "Si estás comparando opciones de {$kw}, céntrate en tres puntos: calidad, control del sistema y soporte para ajustes. Con eso evitas decisiones por impulso y consigues un resultado estable, cómodo y acorde a tu negocio.",
-            "En {$kw} la diferencia suele estar en los detalles: una buena elección considera el tipo de público, la actividad del local y la ventilación. Así se consigue una experiencia agradable, coherente con tu marca y fácil de mantener en el tiempo.",
-            "Un enfoque profesional en {$kw} prioriza comodidad y control: instalación discreta, configuración rápida y posibilidad de ajustes cuando cambian temporadas o el flujo de clientes. El objetivo es que se note para bien, sin complicarte la operación diaria.",
+            "Mejor visibilidad",
+            "Proceso claro",
+            "Entrega ágil",
+            "Soporte real",
+            "Sin fricción",
+            "Resultados reales",
+            "Calidad técnica",
+            "Paso a paso",
+            "Precio claro",
+            "Opciones a medida",
+            "Trato cercano",
+            "Reserva fácil",
         ];
 
-        $p = $this->pickVariant($opts, "sec_p|rid=".(int)$this->registroId."|seed=".$seed."|i=".$i."|kw=".$kw);
-
-        if ($wrapP) return trim(strip_tags($p));
-        return ($type === 'editor') ? $p : trim(strip_tags($p));
+        // para variar por sección
+        $i = (int)($m[1] ?? 1);
+        return $this->pickVariant($opts, "title_short|rid=".(int)$this->registroId."|seed=".$seed."|i=".$i."|kw=".$kw);
     }
 
+    // ✅ PARRAFOS DE SECCION: naturales, sin plantillas, sin "(bloque i)"
+    if (preg_match('~^SECTION_(\d+)_P$~', $tok, $m)) {
+        $i  = (int)($m[1] ?? 1);
+        $kw = $this->shortKw();
+
+        // lee spec del themePlan (topic/format/angle)
+        $spec = $themePlan[$i] ?? [];
+        $topic  = is_array($spec) ? (string)($spec['topic'] ?? '') : '';
+        $format = is_array($spec) ? (string)($spec['format'] ?? '') : '';
+        $angle  = is_array($spec) ? (string)($spec['angle'] ?? '') : '';
+
+       $templates = [
+        "Con {$kw}, lo importante es que el visitante entienda rápido qué ofreces, qué incluye y cuál es el siguiente paso. Por eso ordenamos la información en bloques claros (beneficio, alcance y proceso) y dejamos una llamada a la acción simple. Así reduces dudas y haces que contactar sea lo natural.",
+
+        "Un buen {$kw} no se basa en “meter texto”, sino en responder lo que frena la decisión: precio orientativo, tiempos, qué entregas y cómo se trabaja. Cuando eso queda claro desde el inicio, el usuario confía más y avanza sin sentirse presionado.",
+
+        "Si ya probaste opciones genéricas, normalmente el problema fue la falta de enfoque: mensaje poco claro, estructura confusa o un CTA débil. En {$kw} lo resolvemos definiendo objetivo y público, y construyendo un recorrido sencillo para que el visitante llegue a contactarte con seguridad.",
+
+        "Para que {$kw} te genere resultados, hay que cuidar dos cosas: claridad y confianza. Claridad para que se entienda qué haces y cómo se contrata; confianza para que el usuario sienta que está en buenas manos. Con ese equilibrio, tu web deja de ser solo “bonita” y empieza a convertir.",
+
+        "El proceso de {$kw} funciona mejor cuando es predecible: sabes qué se hace primero, qué se valida y cuándo se entrega. Trabajamos por etapas cortas con revisiones puntuales para avanzar rápido sin perder control. Eso evita retrabajos y acelera el lanzamiento.",
+
+        "En {$kw}, lo que más valoran los clientes es la tranquilidad: una propuesta clara, comunicación directa y entregables definidos. Por eso evitamos tecnicismos innecesarios y explicamos cada paso con lenguaje simple. Tú decides con información clara y sin sorpresas.",
+
+        "Cuando alguien compara alternativas de {$kw}, suele preguntar lo mismo: qué incluye, cuánto tarda y qué soporte tiene. Aquí lo dejamos claro desde el inicio para reducir fricción. Si encaja, el siguiente paso es sencillo: consultar disponibilidad o pedir propuesta.",
+
+        "Un sitio de {$kw} se siente profesional cuando todo encaja: mensaje coherente, estructura fácil de leer y acciones claras para contactar. No se trata de decir “somos los mejores”, sino de mostrarlo con una experiencia simple y bien guiada. Eso sube la intención de contacto.",
+
+        "Si el objetivo es captar clientes con {$kw}, la web debe guiar sin ruido: beneficio arriba, detalles después y cierre con un CTA directo. Al eliminar información innecesaria y ordenar lo esencial, haces que la decisión sea más fácil. Esa claridad suele marcar la diferencia.",
+
+        "En {$kw}, los errores más comunes suelen ser: no definir alcance, no fijar etapas y dejar el mensaje demasiado genérico. Aquí se evita con una estructura clara y validaciones rápidas. Así consigues un resultado sólido sin alargar tiempos ni complicarte.",
+    ];
+
+
+        // Selección determinista y distinta por sección + keyword + registro
+      $salt = "fb_p|rid=".(int)$this->registroId."|seed=".($seed + ($i*997))."|i=".$i."|kw=".$kw."|topic=".$topic."|angle=".$angle."|format=".$format;
+
+        $p = $this->pickVariant($templates, $salt);
+
+        return ($type === 'editor' && !$wrapP) ? $p : trim(strip_tags($p));
+    }
     // ✅ FAQ Q/A
     if (preg_match('~^FAQ_\d+_Q$~', $tok)) {
         $opts = [
@@ -1063,10 +1319,10 @@ private function fallbackForToken(
     }
 
     // ✅ Genérico final (sin “Texto preparado…”)
-    $generic = $this->pickVariant([
-        "Texto listo para ajustar y publicar con claridad.",
-        "Contenido preparado para encajar con tu página sin ruido.",
-        "Sección redactada con enfoque natural y fácil de leer.",
+        $generic = $this->pickVariant([
+        "Contenido redactado con claridad y listo para tu landing.",
+        "Texto natural y directo, pensado para que el bloque se entienda rápido.",
+        "Sección escrita para explicar beneficios y guiar al siguiente paso.",
     ], "gen|rid=".(int)$this->registroId."|seed=".$seed."|tok=".$tok);
 
     return ($type === 'editor' && !$wrapP) ? $generic : trim(strip_tags($generic));
@@ -1138,7 +1394,11 @@ private function fallbackForToken(
 ): array {
     // Tokens críticos base
     $critical = ['KIT_H1','PRICE_H2','CLIENTS_LABEL','TESTIMONIOS_TITLE','SEO_TITLE','HERO_H1'];
-    for ($i=1; $i<=12; $i++) $critical[] = "CONT_{$i}";
+    for ($i=1; $i<=12; $i++) {
+    $critical[] = "CONT_{$i}";
+    $critical[] = "CONT_{$i}_H2";
+    $critical[] = "CONT_{$i}_P";
+}
 
     // Solo los que existen en la plantilla
     $want = [];
@@ -1281,9 +1541,7 @@ private function fallbackForToken(
 
     $banTitles = implode(' | ', array_slice(array_filter($usedTitles), 0, 20));
 
-    $planLines = [];
-    for ($i=1; $i<=26; $i++) $planLines[] = "SECTION_{$i}: " . ($themePlan[$i] ?? 'Tema');
-    $planText = implode("\n", $planLines);
+    $planText = $this->themePlanToText($themePlan);
 
     $currentMini = [];
     foreach ($keys as $k) $currentMini[(string)$k] = $this->toStr($currentValues[(string)$k] ?? '');
@@ -1297,6 +1555,12 @@ private function fallbackForToken(
         if (preg_match('~^CONT_\d+$~', $k)) $rules[] = "- {$k}: 1–2 frases con valor/beneficio real, sin humo.";
         if ($k === 'SEO_TITLE') $rules[] = "- SEO_TITLE: ≤ 60 caracteres, incluir keyword, enfoque venta/valor.";
         if ($k === 'HERO_H1')   $rules[] = "- HERO_H1: 6–12 palabras, humano, distinto a SEO_TITLE.";
+        if (preg_match('~^SECTION_\d+_P$~', $k)) {
+            $rules[] = "- {$k}: escribe como copy FINAL de landing (2–4 frases). PROHIBIDO explicar cómo escribir, PROHIBIDO 'este bloque/este apartado/esta sección'.";
+        }
+        if (preg_match('~^SECTION_\d+_P_SHORT$~', $k)) {
+            $rules[] = "- {$k}: microcopy FINAL (1 frase corta). PROHIBIDO 'este bloque/este apartado'.";
+        }
     }
     $rulesText = implode("\n", array_values(array_unique($rules)));
 
@@ -1341,6 +1605,8 @@ REGLAS:
 - ❌ No genéricos (“Contenido útil”, etc.)
 - ✅ Beneficios concretos, sin inventar cifras.
 - ✅ CTA natural.
+- ❌ Prohibido “texto guía”: no uses “este bloque/este apartado/esta sección”, ni expliques cómo escribir.
+- ✅ Escribe como si fuera el texto final publicado en la web.
 
 Reglas por token:
 {$rulesText}
@@ -1751,8 +2017,6 @@ PROMPT;
         "Clientes con prisa",
         "Clientes exigentes",
         "Pymes",
-        "Familias",
-        "Viajeros",
         "Negocios locales",
         "Empresas",
     ];
@@ -1895,7 +2159,7 @@ PROMPT;
         foreach ($arr as $k => $v) {
             $k = (string)$k;
 
-            if (!preg_match('~(SEO_TITLE|HERO_H1|KIT_H1|PRICE_H2|TESTIMONIOS_TITLE|CLIENTS_LABEL|FAQ_TITLE|FAQ_\d+_Q|SECTION_\d+_TITLE)$~', $k)) {
+            if (!preg_match('~(SEO_TITLE|HERO_H1|KIT_H1|PRICE_H2|TESTIMONIOS_TITLE|CLIENTS_LABEL|FAQ_TITLE|FAQ_\d+_Q|SECTION_\d+_TITLE|CONT_\d+_H2)$~', $k)) {
                 continue;
             }
 
@@ -1929,6 +2193,11 @@ PROMPT;
             'resultado tangible',
             'tema guía',
             'plan de temas',
+              'presencia online',
+    'clara y efectiva',
+    'sitio web profesional',
+    'web profesional',
+    'con un enfoque',
         ];
 
         foreach ($bannedContains as $needle) {
@@ -1966,7 +2235,10 @@ private function sanitizeTitle(string $title, string $field = 'SEO_TITLE'): stri
     // Normaliza separadores: prefiere ":" en vez de "|"
     $t = str_replace([' | ', '|'], ': ', $t);
     $t = trim(preg_replace('~\s*:\s*~u', ': ', $t));
-
+// ❌ títulos rotos tipo "u presencia..." / "e comercio..."
+if (preg_match('~^[a-záéíóúñü]\s+[a-z]~iu', $t)) {
+    $t = '';
+}
     // Capitaliza primera letra (sin intentar Title Case agresivo)
     if ($t !== '') {
         $first = mb_substr($t, 0, 1);
@@ -1987,14 +2259,14 @@ private function sanitizeTitle(string $title, string $field = 'SEO_TITLE'): stri
     $kw = $this->shortKw();
 
     $opts = [
-        "{$kw}: Reserva rápida y atención discreta",
-        "{$kw}: Experiencia exclusiva y trato profesional",
-        "{$kw}: Sensualidad y relajación en un solo paso",
-        "{$kw}: Servicio a domicilio con total privacidad",
-        "{$kw}: Opciones claras y atención inmediata",
-        "{$kw}: Discreción, confort y experiencia premium",
-        "{$kw}: Elige tu sesión y confirma en minutos",
-        "{$kw}: Una experiencia sensorial sin complicaciones",
+         "{$kw}: Precio claro y pasos simples",
+            "{$kw}: Atención directa y respuesta rápida",
+            "{$kw}: Opciones a medida y entrega ágil",
+            "{$kw}: Servicio profesional con soporte real",
+            "{$kw}: Proceso claro y contacto fácil",
+            "{$kw}: Solución práctica sin complicarte",
+            "{$kw}: Reserva o consulta en minutos",
+            "{$kw}: Calidad y trato cercano",
     ];
 
     $salt = "sanitize|rid=".(int)$this->registroId."|kw=".$kw."|raw=".$t;
@@ -2061,5 +2333,592 @@ private function sanitizeTitle(string $title, string $field = 'SEO_TITLE'): stri
         $i = $this->stableSeedInt($salt) % max(1, count($opts));
         return (string)($opts[$i] ?? $opts[0]);
     }
+
+
+
+    private function loadTemplateMetaForPath(string $tplPath): array
+    {
+        // Si es HTML inline o algo raro, no hay meta
+        if ($tplPath === 'PLAIN_HTML_INLINE') return [];
+
+        $base = pathinfo($tplPath, PATHINFO_FILENAME); // elementor_token_xxx
+        $metaPath = storage_path('app/elementor/meta/' . $base . '.meta.json');
+
+        if (!is_file($metaPath)) return [];
+
+        $raw = json_decode(file_get_contents($metaPath), true);
+        return is_array($raw) ? $raw : [];
+    }
+
+    private function applyMetaLengthRules(array $values, array $meta, array $tokensMeta): array
+{
+    foreach ($values as $k => $v) {
+        $token = '{{' . (string)$k . '}}';
+
+        $info = $meta[$token] ?? null;
+        if (!$info) continue;
+
+        $widget = $info['widget'] ?? '';
+        $tag    = strtolower((string)($info['tag'] ?? ''));
+        $field  = $info['field'] ?? '';
+
+        // texto plano para medir
+        $plain = trim(preg_replace('~\s+~u', ' ', strip_tags($this->toStr($v))));
+        if ($plain === '') continue;
+
+        // ✅ reglas por widget/tag
+        $maxWords = null;
+
+        if ($widget === 'heading') {
+            // span/p => micro
+            if (in_array($tag, ['span','p'], true)) $maxWords = 2;
+            elseif ($tag === 'h1') $maxWords = 12;
+            elseif (in_array($tag, ['h2','h3'], true)) $maxWords = 8;
+            else $maxWords = 10;
+        }
+        elseif ($widget === 'button') {
+            if (($info['tag'] ?? '') === 'url') {
+                // URL no se toca
+                continue;
+            }
+            $maxWords = 3;
+        }
+        elseif ($widget === 'text-editor') {
+            // párrafo: limita para no romper layout
+            $maxWords = 70;
+        }
+
+        if ($maxWords !== null && $this->wordCount($plain) > $maxWords) {
+            $plain = $this->truncateByWords($plain, $maxWords);
+            $plain = rtrim($plain, " ,.;:-");
+        }
+
+        // ✅ respeta tipo editor/plain según tokensMeta (tu normalizador)
+        $metaTok = $tokensMeta[(string)$k] ?? ['type'=>'plain','wrap_p'=>false];
+        $values[(string)$k] = $this->normalizeValueByTokenMeta($plain, $metaTok);
+    }
+
+    return $values;
+}
+
+private function wordCount(string $s): int
+{
+    $w = preg_split('~\s+~u', trim($s), -1, PREG_SPLIT_NO_EMPTY);
+    return is_array($w) ? count($w) : 0;
+}
+
+private function truncateByWords(string $s, int $maxWords): string
+{
+    $w = preg_split('~\s+~u', trim($s), -1, PREG_SPLIT_NO_EMPTY);
+    if (!is_array($w) || count($w) <= $maxWords) return $s;
+    $w = array_slice($w, 0, $maxWords);
+    return implode(' ', $w);
+}
+
+
+
+
+private function normalizeMetaKeys(array $meta): array
+{
+    $out = [];
+    foreach ($meta as $k => $v) {
+        $kk = trim((string)$k);
+        // "{{TOKEN}}" -> "TOKEN"
+        if (preg_match('~^\{\{([A-Z0-9_]+)\}\}$~', $kk, $m)) $kk = $m[1];
+        if ($kk === '') continue;
+        $out[$kk] = is_array($v) ? $v : [];
+    }
+    return $out;
+}
+
+private function loadOrInferTemplateMeta(string $tplPath, array $tpl): array
+{
+    if ($tplPath === 'PLAIN_HTML_INLINE') return [];
+
+    $file = basename($tplPath);
+    $base = preg_replace('~\.json$~i', '', $file);
+    $metaPath = storage_path('app/elementor/meta/' . $base . '.meta.json');
+
+    if (is_file($metaPath)) {
+        $raw = json_decode(file_get_contents($metaPath), true);
+        return is_array($raw) ? $raw : [];
+    }
+
+    // Si no existe meta, inferir
+    return $this->inferMetaFromTemplate($tpl);
+}
+
+private function inferMetaFromTemplate(array $tpl): array
+{
+    $meta = [];
+
+    $walk = function($node) use (&$walk, &$meta) {
+        if (!is_array($node)) return;
+
+        if (($node['elType'] ?? null) === 'widget') {
+            $wt = strtolower((string)($node['widgetType'] ?? ''));
+            $settings = $node['settings'] ?? [];
+
+            if (is_array($settings)) {
+                if ($wt === 'heading' && !empty($settings['title']) && is_string($settings['title'])) {
+                    if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $settings['title'], $m)) {
+                        $hs = strtolower((string)($settings['header_size'] ?? 'h3'));
+                        if (!in_array($hs, ['h1','h2','h3','h4','h5','h6'], true)) $hs = 'h3';
+                        foreach ($m[0] as $tok) $meta[$tok] = ['tag'=>$hs,'widget'=>'heading','field'=>'title'];
+                    }
+                }
+
+                if ($wt === 'text-editor' && !empty($settings['editor']) && is_string($settings['editor'])) {
+                    if (preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $settings['editor'], $m)) {
+                        foreach ($m[0] as $tok) $meta[$tok] = ['tag'=>'p','widget'=>'text-editor','field'=>'editor'];
+                    }
+                }
+
+                if ($wt === 'button') {
+                    foreach (['text','button_text'] as $f) {
+                        if (!empty($settings[$f]) && is_string($settings[$f]) && preg_match_all('/\{\{[A-Z0-9_]+\}\}/', $settings[$f], $m)) {
+                            foreach ($m[0] as $tok) $meta[$tok] = ['tag'=>'span','widget'=>'button','field'=>$f];
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (['elements','content'] as $k) {
+            if (!empty($node[$k]) && is_array($node[$k])) {
+                foreach ($node[$k] as $child) $walk($child);
+            }
+        }
+    };
+
+    $walk($tpl);
+    return $meta;
+}
+
+private function isNumericOnlyText(string $s): bool
+{
+    $t = trim(strip_tags($s));
+    if ($t === '') return false;
+    return (bool) preg_match('~^\d+(?:[.,]\d+)?$~', $t);
+}
+
+private function shortenByMeta(string $tokenKey, string $value, array $meta): string
+{
+    $info   = $meta[$tokenKey] ?? [];
+    $tag    = strtolower((string)($info['tag'] ?? ''));
+    $widget = strtolower((string)($info['widget'] ?? '')); // 👈 CLAVE
+
+    $plain = trim(preg_replace('~\s+~u', ' ', strip_tags($value)));
+    if ($plain === '') return $plain;
+
+    // ✅ 1) Text-editor = párrafos reales (NO los mates)
+    if ($widget === 'text-editor') {
+        // SEO/UX: 60–110 palabras aprox (ajusta a gusto)
+        $wc = $this->wordCount($plain);
+        if ($wc > 115) $plain = $this->truncateByWords($plain, 115);
+        return $plain;
+    }
+
+    // ✅ 2) Heading (títulos)
+    if ($widget === 'heading') {
+        // TITLE_SHORT = micro label
+        if (preg_match('~_TITLE_SHORT$~', $tokenKey)) {
+            return $this->truncateWords($plain, 4);
+        }
+
+        // Títulos normales: 6–10 palabras (depende de tu layout)
+        if (in_array($tag, ['h2','h3','h4'], true)) return $this->truncateWords($plain, 10);
+        if ($tag === 'h1') return $this->truncateWords($plain, 12);
+
+        return $this->truncateWords($plain, 10);
+    }
+
+    // ✅ 3) Button / spans: microcopy
+    if ($widget === 'button' || in_array($tag, ['span'], true)) {
+        return $this->truncateWords($plain, 4);
+    }
+
+    return $plain;
+}
+
+
+private function truncateWords(string $s, int $maxWords): string
+{
+    $w = preg_split('~\s+~u', trim($s), -1, PREG_SPLIT_NO_EMPTY);
+    if (!$w) return '';
+
+    if (count($w) > $maxWords) {
+        $w = array_slice($w, 0, $maxWords);
+    }
+
+    $out = implode(' ', $w);
+    $out = trim($out, " ,.;:-");
+
+    // ✅ evita finales feos/cortados
+    $badEnds = ['y','o','de','del','la','el','en','para','con','sin','que','a','al'];
+    $words = preg_split('~\s+~u', $out, -1, PREG_SPLIT_NO_EMPTY);
+    while (is_array($words) && count($words) > 3) {
+        $last = mb_strtolower(end($words));
+        if (!in_array($last, $badEnds, true)) break;
+        array_pop($words);
+    }
+
+    return trim(implode(' ', $words), " ,.;:-");
+}
+
+
+
+private function applyUrlTokensFromMeta(array &$tpl, array $values, array $defaults = []): void
+{
+    $walk = function (&$node) use (&$walk, $values, $defaults) {
+        if (!is_array($node)) return;
+
+        // widget?
+        if (($node['elType'] ?? null) === 'widget') {
+            $settings = $node['settings'] ?? null;
+            if (is_array($settings)) {
+
+                // Caso link como array
+                if (!empty($settings['link']) && is_array($settings['link'])) {
+                    if (!empty($settings['link']['__tseo_url_token']) && is_string($settings['link']['__tseo_url_token'])) {
+                        $tok = $settings['link']['__tseo_url_token']; // {{HERO_BTN_URL}} etc
+                        $key = trim($tok, '{}'); // HERO_BTN_URL
+
+                        $url = $values[$key] ?? $defaults[$tok] ?? $defaults[$key] ?? null;
+
+                        // Si no hay valor, deja el url original (NO lo rompas)
+                        if (is_string($url) && trim($url) !== '') {
+                            $settings['link']['url'] = trim($url);
+                        }
+
+                        unset($settings['link']['__tseo_url_token']);
+                        $node['settings'] = $settings;
+                    }
+                }
+
+                // Caso link como string (guardado en __tseo_link_token)
+                if (!empty($settings['__tseo_link_token']) && is_string($settings['__tseo_link_token'])) {
+                    $tok = $settings['__tseo_link_token'];
+                    $key = trim($tok, '{}');
+
+                    $url = $values[$key] ?? $defaults[$tok] ?? $defaults[$key] ?? null;
+                    if (is_string($url) && trim($url) !== '') {
+                        $settings['link'] = trim($url);
+                    }
+
+                    unset($settings['__tseo_link_token']);
+                    $node['settings'] = $settings;
+                }
+            }
+        }
+
+        foreach (['elements','content'] as $k) {
+            if (!empty($node[$k]) && is_array($node[$k])) {
+                foreach ($node[$k] as &$child) $walk($child);
+                unset($child);
+            }
+        }
+    };
+
+    $walk($tpl);
+}
+
+private function valueLooksBad(string $token, string $val): bool
+{
+    $plain = trim(preg_replace('~\s+~u', ' ', strip_tags($val)));
+    $lc    = mb_strtolower($plain);
+
+    if ($plain === '') return true;
+
+    // Solo aplica reglas "de párrafo" a P y P_SHORT
+    $isParagraph = (bool)(
+    preg_match('~(_P|_P_SHORT)$~', $token) ||
+    preg_match('~^CONT_\d+_P$~', $token)
+);
+
+    // =========================
+    // 1) FILTRO META / INSTRUCCIONES (SOLO PÁRRAFOS + UMBRAL)
+    // =========================
+    if ($isParagraph) {
+        $metaPhrases = [
+            'este bloque','este apartado','esta sección',
+            'termina con un siguiente paso','así el usuario no se pierde',
+            'criterios de decisión','estructura clara','enfoque efectivo',
+            'para que convierta','la diferencia suele estar','no basta con',
+        ];
+
+        $hits = 0;
+        foreach ($metaPhrases as $p) {
+            if (str_contains($lc, $p)) $hits++;
+            if ($hits >= 2) return true; // umbral para evitar falsos positivos
+        }
+
+        // patrón “manual”: "este bloque..." + verbo guía
+        if (
+            preg_match('~\b(este bloque|este apartado|esta sección)\b~iu', $plain) &&
+            preg_match('~\b(debe|conviene|prioriza|organiza|remata|evita)\b~iu', $plain)
+        ) {
+            return true;
+        }
+
+        // patrón guía típico: "En X, ... para/conviene/debe..."
+        if (preg_match('~\ben\s+([a-záéíóúñü\s]{2,40}),\s+.*\b(para|conviene|debe|organiza|evita)\b~iu', $plain)) {
+            return true;
+        }
+
+        // "En {kw}," pero SOLO si además hay señales de plantilla
+        $kw = $this->shortKw();
+        if ($kw !== '' && preg_match('~^en\s+'.preg_quote($kw,'~').'\s*,~iu', $plain)) {
+            if (preg_match('~\b(lo importante|la diferencia|no basta|por eso|así)\b~iu', $plain)) {
+                return true;
+            }
+        }
+    }
+
+    // =========================
+    // 2) BASURA / SPAM / REPETICIÓN
+    // =========================
+
+    // palabra absurdamente larga (token pegado)
+    if (preg_match('~\p{L}{60,}~u', $plain)) return true;
+
+    // "spam de sinónimos" / texto descontrolado
+    if (preg_match('~\b\p{L}{18,}\b~u', $plain) && substr_count($lc, 'mente') > 8) {
+        return true;
+    }
+
+    // misma palabra repetida muchas veces
+    $words = preg_split('~\s+~u', $lc, -1, PREG_SPLIT_NO_EMPTY);
+    if (is_array($words) && count($words) >= 30) {
+        $freq = array_count_values($words);
+        $max  = max($freq);
+        if ($max >= 6) return true;
+    }
+
+    // demasiada repetición de bigramas (texto “en bucle”)
+    if (mb_strlen($plain) > 220) {
+        $b = $this->bigrams($plain);
+        if (is_array($b) && count($b) < (mb_strlen($plain) / 6)) {
+            return true;
+        }
+    }
+
+    // =========================
+    // 3) PLACEHOLDERS / BOILERPLATE
+    // =========================
+    $badPhrases = [
+        'texto listo para ajustar',
+        'contenido preparado para encajar',
+        'sección redactada con enfoque',
+        'texto preparado para',
+        'listo para publicar con claridad',
+        'un buen paginas web no se basa',
+        'con paginas web, lo importante es',
+        'para que paginas web te genere resultados',
+        'en paginas web, lo que más valoran',
+        'cuando alguien compara alternativas de paginas web'
+    ];
+    foreach ($badPhrases as $p) {
+        if (str_contains($lc, $p)) return true;
+    }
+
+    // corchetes tipo [CTA]
+    if (preg_match('~\[[^\]]+\]~u', $plain)) return true;
+
+    // =========================
+    // 4) CONTAMINACIÓN TÉCNICA (SOLO PÁRRAFOS)
+    // =========================
+    if ($isParagraph) {
+        $tech = [
+            // marcas/herramientas
+            'proxmox','cpanel','cyberpanel',
+            'laravel','node.js','nodejs','php',
+            'wordpress','woocommerce','tailwind','bootstrap',
+            // vocabulario técnico relleno
+            'infraestructura','despliegue','despliegues','pipeline','pipelines',
+            'ci/cd','devops','vps','ssl','certificado','certificados',
+            'api','webhook','webhooks'
+        ];
+        foreach ($tech as $t) {
+            if (str_contains($lc, $t)) return true;
+        }
+    }
+
+    // =========================
+    // 5) REGLAS POR SUFIJO
+    // =========================
+
+    // URLs
+    if (preg_match('~(_BTN_URL|BTN_URL)$~', $token)) {
+        if (preg_match('~^(#[-a-z0-9_]+|https?://\S+)$~i', trim($plain))) return false;
+        return true;
+    }
+
+    // Botones texto
+    if (preg_match('~(_BTN_TEXT|BTN_TEXT)$~', $token)) {
+        $w  = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($w) ? count($w) : 0;
+        return ($wc < 1 || $wc > 4);
+    }
+    // CONT_x_H2 (título tipo H2)
+    if (preg_match('~^CONT_\d+_H2$~', $token)) {
+        $w  = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($w) ? count($w) : 0;
+
+        if ($wc < 3 || $wc > 10) return true;
+        if (mb_strlen($plain) > 80) return true;
+
+        // evita finales feos/cortados
+        if (preg_match('~\b(y|o|de|del|la|el|en|para|con|sin|:)\s*$~iu', $plain)) return true;
+        if (preg_match('~[:\-]\s*$~u', $plain)) return true;
+
+        return false;
+    }
+
+
+    // CONT_x_P (párrafo normal)
+    if (preg_match('~^CONT_\d+_P$~', $token)) {
+        $w  = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($w) ? count($w) : 0;
+
+        // similar a _P pero un poco más permisivo si lo quieres
+        if ($wc < 25) return true;
+        if ($wc > 140) return true;
+
+        // párrafo cortado
+        if (preg_match('~\b(una|un|tu|tus|de|del|la|el|en|para|con|y|o|:)\s*$~iu', $plain)) return true;
+
+        return false;
+    }
+    // Titles cortos
+    if (preg_match('~_TITLE_SHORT$~', $token)) {
+        $w  = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($w) ? count($w) : 0;
+
+        if ($wc < 1 || $wc > 4) return true;
+        if (mb_strlen($plain) > 32) return true;
+
+        $bad = ['sección','contenido','explicar','texto','listo','bloque'];
+        foreach ($bad as $b) {
+            if (str_contains($lc, $b)) return true;
+        }
+
+        // evita finales feos o cortados
+        if (preg_match('~[:\-]\s*$~u', $plain)) return true;
+        if (preg_match('~\b(y|o|de|del|la|el|en|para|con|sin)\s*$~iu', $plain)) return true;
+
+        return false;
+    }
+
+    // Titles normales
+    if (preg_match('~_TITLE$~', $token)) {
+        $w  = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($w) ? count($w) : 0;
+
+        if ($wc < 3 || $wc > 12) return true;
+        if (mb_strlen($plain) > 90) return true;
+
+        // título cortado
+        if (preg_match('~\b(y|o|de|del|la|el|en|para|con|sin|:)\s*$~iu', $plain)) return true;
+
+        return false;
+    }
+
+    // P_SHORT
+    if (preg_match('~_P_SHORT$~', $token)) {
+        $w  = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($w) ? count($w) : 0;
+
+        if ($wc < 3) return true;
+        if ($wc > 25) return true;
+
+        // párrafo cortado
+        if (preg_match('~\b(una|un|tu|tus|de|del|la|el|en|para|con|y|o|:)\s*$~iu', $plain)) return true;
+
+        return false;
+    }
+
+    // P normal (SEO/UX): tolerante para no caer a fallback
+    if (preg_match('~_P$~', $token)) {
+        $w  = preg_split('~\s+~u', $plain, -1, PREG_SPLIT_NO_EMPTY);
+        $wc = is_array($w) ? count($w) : 0;
+
+        // lista “corrida” sin comas (suele salir como texto roto)
+        if (
+            mb_strlen($plain) > 120 &&
+            preg_match('~\b(como|por ejemplo)\b~iu', $plain) &&
+            preg_match('~\b(velocidad|seguridad|móvil|integraciones?)\b~iu', $plain) &&
+            !str_contains($plain, ',')
+        ) {
+            return true;
+        }
+
+        // párrafo cortado
+        if (preg_match('~\b(una|un|tu|tus|de|del|la|el|en|para|con|y|o|:)\s*$~iu', $plain)) return true;
+
+        if ($wc < 35) return true;
+        if ($wc > 140) return true;
+
+        return false;
+    }
+
+    return false;
+}
+
+private function pregQuoteKw(string $kw): string
+{
+    return preg_quote(mb_strtolower(trim($kw)), '~');
+}
+/**
+ * Limpieza dura ANTES de validar (quita +, líneas SECTION_:, basura típica)
+ */
+private function hardCleanValue(string $v): string
+{
+    $v = trim((string)$v);
+
+    // quita + al inicio
+    $v = preg_replace('~^\s*\+\s+~u', '', $v);
+
+    // quita líneas tipo "SECTION_10: ..."
+    $v = preg_replace('~(?mi)^\s*SECTION_\d+\s*:\s*.*$~u', '', $v);
+
+    // quita textos boilerplate
+    $v = preg_replace('~(?i)(contenido preparado para encajar con tu página sin ruido\.?|texto listo para ajustar y publicar con claridad\.?|sección redactada con enfoque natural y fácil de leer\.?)~u', '', $v);
+
+    // normaliza espacios
+    $v = preg_replace('~\s+~u', ' ', $v);
+    return trim($v);
+}
+
+private function themePlanToText(array $themePlan): string
+{
+    $lines = [];
+    foreach ($themePlan as $i => $spec) {
+        if (is_array($spec)) {
+            $topic  = (string)($spec['topic'] ?? 'Tema');
+            $format = (string)($spec['format'] ?? 'texto');
+            $angle  = (string)($spec['angle'] ?? 'general');
+            $lines[] = "SECTION_{$i}: {$topic} | formato: {$format} | ángulo: {$angle}";
+        } else {
+            $lines[] = "SECTION_{$i}: " . (string)$spec;
+        }
+    }
+    return implode("\n", $lines);
+}
+
+
+private function inferSectionsFromTokens(array $tokensMeta, int $min = 26, int $max = 120): int
+{
+    $maxN = 0;
+    foreach (array_keys($tokensMeta) as $k) {
+        if (preg_match('~^SECTION_(\d+)_~', (string)$k, $m)) {
+            $n = (int)$m[1];
+            if ($n > $maxN) $maxN = $n;
+        }
+    }
+    if ($maxN <= 0) $maxN = $min;
+    $maxN = max($min, min($maxN, $max));
+    return $maxN;
+}
 
 }
