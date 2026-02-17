@@ -1644,10 +1644,11 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     }
 
 
-   public function GuardarPlantilla(Request $request)
+  public function GuardarPlantilla(Request $request)
 {
     $request->validate([
-        'archivo' => ['required', 'file', 'max:5120'],
+        'nombre'  => ['required','string','max:80'],
+        'archivo' => ['required','file','max:5120'],
     ]);
 
     $rawStr = file_get_contents($request->file('archivo')->getRealPath());
@@ -1662,10 +1663,9 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     $widgetTypes = $this->scanWidgetTypes($raw);
     $unsupportedSet = $this->getUnsupportedWidgetSet($widgetTypes);
 
-    // 2) Contar SOLO lo tokenizable (no especiales, no números, no links.url)
+    // 2) Contar SOLO lo tokenizable
     $need = $this->countTokenizableFieldsSmart($raw, $unsupportedSet);
 
-    // Límite
     $max = 70;
     if ($need > $max) {
         return redirect("cargarplantillas")->withErrors([
@@ -1673,12 +1673,17 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
         ]);
     }
 
-    // 3) Tokenizar por tipo (TITLE vs P vs BTN_TEXT vs BTN_URL), sin tocar link.url
+    // 3) Tokenizar
     $usedTokens = [];
     $tokenizado = $this->tokenizeTemplateSmart($raw, $unsupportedSet, $usedTokens);
 
-    // 4) Guardar
-    $outName = 'elementor_token_' . date('Ymd_His') . '_' . uniqid() . '.json';
+    // 4) Guardar con nombre del usuario (sanitizado)
+    $nombre = trim((string)$request->input('nombre'));
+    $slugNombre = Str::slug($nombre);
+    if ($slugNombre === '') $slugNombre = 'plantilla';
+
+    $outName = 'plantilla_' . $slugNombre . '.json';
+
     $dir = storage_path('app/elementor');
     if (!is_dir($dir)) mkdir($dir, 0755, true);
 
@@ -1688,7 +1693,7 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
     );
 
     return redirect("cargarplantillas")
-        ->withSuccess("Plantilla tokenizada y guardada en: storage/app/elementor/$outName (tokens usados: " . count($usedTokens) . ")");
+        ->withSuccess("Plantilla '{$nombre}' guardada en: storage/app/elementor/$outName (tokens usados: " . count($usedTokens) . ")");
 }
 
 
