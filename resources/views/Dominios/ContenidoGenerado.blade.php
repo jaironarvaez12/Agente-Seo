@@ -93,8 +93,9 @@
               <th>Estatus</th>
               <th>Título</th>
               <th>Keyword</th>
-              <th>Fecha</th>
-              <th>Programado para</th>
+              <th>Creado</th>
+              <th>Publicado</th>
+              <th>Programado</th>
               <th class="text-center">Acción</th>
             </tr>
           </thead>
@@ -121,7 +122,16 @@
                 </td>
                 <td>{{ $it->title ?: '(Sin título)' }}</td>
                 <td>{{ $it->keyword }}</td>
-                <td>{{ $it->created_at }}</td>
+                <td>{{ date('d-m-Y g:i:s A', strtotime($it->created_at)) }}</td>
+                <td>
+                  @if($it->fecha_publicado==null)
+                    ---
+                  @else
+                   {{ date('d-m-Y g:i:s A', strtotime($it->fecha_publicado)) }}
+                  @endif
+                 
+
+                </td>
                 <td>
                   @if($it->estatus === 'programado')
                     <span class="fw-medium">
