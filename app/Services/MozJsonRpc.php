@@ -57,4 +57,32 @@ class MozJsonRpc
 
         return $res['result'] ?? [];
     }
+
+
+
+    public function siteRankingKeywordList(
+    string $query,
+    string $scope = 'domain',
+    string $locale = 'es-ES',
+    int $n = 0,
+    int $limit = 50,
+    string $sort = 'rank'
+): array {
+    return $this->call('data.site.ranking-keyword.list', [
+        'data' => [
+            'target_query' => [
+                'query' => $query,
+                'scope' => $scope,
+                'locale' => $locale,
+            ],
+            'options' => [
+                'sort' => $sort,
+            ],
+            'page' => [
+                'n' => $n,
+                'limit' => $limit,
+            ],
+        ],
+    ]);
+}
 }

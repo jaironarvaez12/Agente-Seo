@@ -10,6 +10,7 @@ use App\Jobs\RunTechAuditSectionJob;
 use App\Jobs\FetchPageSpeedSectionJob;
 use App\Jobs\FinalizeSeoReportJob;
 use App\Jobs\FetchMozKeywordMetricsJob;
+use App\Jobs\FetchMozRankingKeywordsJob;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Str;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -222,24 +223,46 @@ class SeoReportController extends Controller
                 'status'       => 'generando',
             ]);
 
+            $locale = $request->input('locale', 'es-ES');
+           // dd($locale);
+           
+            $keywords = $this->keywordsFromDomain($dominio->id_dominio);
+
             Bus::chain([
                 (new FetchMozSectionJob($report->id))->onQueue('reports'),
+
+                // Ranking usa locale (pero internamente el job decidirá real/estimado)
+                (new FetchMozRankingKeywordsJob(
+                    reportId: $report->id,
+                    keywords: $keywords,
+                    locale: $locale,
+                    limitePorPagina: 50,
+                    maxResultados: 50,
+                    maxKwParaScore: 15,
+                    cacheDays: 30
+                ))->onQueue('reports'),
+
                 (new RunTechAuditSectionJob($report->id, 200))->onQueue('reports'),
                 (new FinalizeSeoReportJob($report->id))->onQueue('reports'),
             ])->catch(function (\Throwable $e) use ($report) {
                 FinalizeSeoReportJob::dispatch($report->id)->onQueue('reports');
             })->dispatch();
 
+            // PageSpeed igual
             FetchPageSpeedSectionJob::dispatch($report->id)
                 ->onQueue('pagespeed')
                 ->delay(now()->addSeconds(20));
 
-            $keywords = $this->keywordsFromDomain($dominio->id_dominio);
-
-            FetchMozKeywordMetricsJob::dispatch($report->id, $keywords, 'desktop', 'google')
-                ->onQueue('reports')
-                ->delay(now()->addSeconds(5));
-
+            // Keyword metrics usando el MISMO locale
+            FetchMozKeywordMetricsJob::dispatch(
+                reportId: $report->id,
+                keywords: $keywords,
+                device: 'desktop',
+                engine: 'google',
+                maxKeywords: 15,
+                cacheDays: 30,
+                locale: $locale // ✅ nuevo param
+            )->onQueue('reports')->delay(now()->addSeconds(5));
             // =========================================================
             // 7) Mensaje
             // =========================================================

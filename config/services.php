@@ -65,4 +65,11 @@ return [
     'base_url' => env('BACKLINKS_BASE_URL', 'https://backlinks.ideiweb.com'),
     'auth_key' => env('BACKLINKS_AUTH_KEY'),
     ],
+
+
+    'serper' => [
+  'key' => env('SERPER_API_KEY'),
+  'endpoint' => env('SERPER_ENDPOINT', 'https://google.serper.dev/search'),
+],
+
 ];

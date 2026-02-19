@@ -28,7 +28,8 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
         public string $device = 'desktop',
         public string $engine = 'google',
         public int $maxKeywords = 15,      // ✅ baja esto si quieres ahorrar más (ej 10)
-        public int $cacheDays = 30         // ✅ cache para no re-consultar lo mismo
+        public int $cacheDays = 30  ,
+        public string $locale = 'es-ES' // ✅      // ✅ cache para no re-consultar lo mismo
     ) {}
 
     public function handle(MozJsonRpc $moz): void
@@ -60,7 +61,7 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
                         'rows' => [],
                         'no_data_count' => 0,
                         'note' => 'No hay keywords configuradas.',
-                        'locale' => $this->fixedLocale,
+                        'locale' => $this->locale,
                     ],
                 ]
             );
@@ -81,14 +82,14 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
             if (is_array($cached)) {
                 $rows[] = $cached + [
                     'keyword' => $kw,
-                    'locale' => $this->fixedLocale,
+                    'locale' => $this->locale,
                     'cached' => true,
                 ];
                 continue;
             }
 
             try {
-                $result = $moz->keywordMetrics($kw, $this->fixedLocale, $this->device, $this->engine);
+                $result = $moz->keywordMetrics($kw, $this->locale, $this->device, $this->engine);
                 $km = data_get($result, 'keyword_metrics', []);
 
                 // si viene vacío o todo null -> lo tratamos como "sin datos"
@@ -104,7 +105,7 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
                     $noDataCount++;
                     $row = [
                         'keyword' => $kw,
-                        'locale' => $this->fixedLocale,
+                        'locale' => $this->locale,
                         'volume' => null,
                         'difficulty' => null,
                         'organic_ctr' => null,
@@ -120,7 +121,7 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
 
                 $row = [
                     'keyword' => $kw,
-                    'locale' => $this->fixedLocale,
+                    'locale' => $this->locale,
                     'volume' => $km['volume'] ?? null,
                     'difficulty' => $km['difficulty'] ?? null,
                     'organic_ctr' => $km['organic_ctr'] ?? null,
@@ -148,46 +149,56 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
                     return;
                 }
 
-                // ✅ 404 / no data: guarda fila sin datos (1 sola llamada, no reintenta otros locales)
                 if (str_contains($msg, 'No keyword metrics found') || str_contains($msg, '404')) {
-                    $noDataCount++;
-                    $row = [
-                        'keyword' => $kw,
-                        'locale' => $this->fixedLocale,
-                        'volume' => null,
-                        'difficulty' => null,
-                        'organic_ctr' => null,
-                        'priority' => null,
-                        'note' => 'Sin datos en Moz (404)',
-                        'last_error' => $msg,
-                        'cached' => false,
-                    ];
-                    $rows[] = $row;
-                    Cache::put($cacheKey, $row, now()->addDays($this->cacheDays));
-                    continue;
-                }
 
-                Log::warning('Moz keyword metrics error', [
-                    'report_id' => $this->reportId,
-                    'keyword' => $kw,
-                    'locale' => $this->fixedLocale,
-                    'msg' => $msg,
-                ]);
+    // ✅ fallback barato: 1 sola variante corta
+    $variante = $this->generarVarianteCorta($kw);
 
-                $noDataCount++;
+    if ($variante) {
+        try {
+            $r2  = $moz->keywordMetrics($variante, $this->locale, $this->device, $this->engine);
+            $km2 = data_get($r2, 'keyword_metrics', []);
+
+            if (is_array($km2) && !$this->metricsVacias($km2)) {
                 $row = [
                     'keyword' => $kw,
-                    'locale' => $this->fixedLocale,
-                    'volume' => null,
-                    'difficulty' => null,
-                    'organic_ctr' => null,
-                    'priority' => null,
-                    'note' => 'Error consultando Moz',
-                    'last_error' => $msg,
+                    'keyword_consultada' => $variante,
+                    'locale' => $this->locale,
+                    'volume' => $km2['volume'] ?? null,
+                    'difficulty' => $km2['difficulty'] ?? null,
+                    'organic_ctr' => $km2['organic_ctr'] ?? null,
+                    'priority' => $km2['priority'] ?? null,
+                    'note' => 'Sin datos exactos, se usó variante',
                     'cached' => false,
                 ];
+
                 $rows[] = $row;
-                Cache::put($cacheKey, $row, now()->addDays(3));
+                Cache::put($cacheKey, $row, now()->addDays($this->cacheDays));
+                continue;
+            }
+        } catch (\Throwable $e2) {
+            // si falla, caemos al comportamiento normal
+        }
+    }
+
+    // 🔻 si no funcionó, guardamos como antes
+    $noDataCount++;
+    $row = [
+        'keyword' => $kw,
+        'locale' => $this->locale,
+        'volume' => null,
+        'difficulty' => null,
+        'organic_ctr' => null,
+        'priority' => null,
+        'note' => 'Sin datos en Moz (404)',
+        'last_error' => $msg,
+        'cached' => false,
+    ];
+    $rows[] = $row;
+    Cache::put($cacheKey, $row, now()->addDays($this->cacheDays));
+    continue;
+}
+
             }
         }
 
@@ -199,7 +210,7 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
                 'payload' => [
                     'device' => $this->device,
                     'engine' => $this->engine,
-                    'locale' => $this->fixedLocale,
+                    'locale' => $this->locale,
                     'rows' => $rows,
                     'no_data_count' => $noDataCount,
                     'max_keywords' => $this->maxKeywords,
@@ -209,12 +220,11 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
         );
     }
 
-    private function cacheKey(string $kw): string
-    {
-        $norm = $this->normalizeKey($kw);
-        return "moz_kw:{$this->device}:{$this->engine}:{$this->fixedLocale}:" . sha1($norm);
-    }
-
+  private function cacheKey(string $kw): string
+{
+    $norm = $this->normalizeKey($kw);
+    return "moz_kw_v2:{$this->device}:{$this->engine}:{$this->locale}:" . sha1($norm);
+}
     private function sanitizeKeywords(array $keywords): array
     {
         $out = [];
@@ -247,4 +257,36 @@ class FetchMozKeywordMetricsJob implements ShouldQueue
         $s = preg_replace('/\s+/', ' ', $s);
         return trim($s);
     }
+  private function generarVarianteCorta(string $kw): ?string
+{
+    $kw = trim($kw);
+    if ($kw === '') return null;
+
+    // quita "en <ciudad>" al final
+    $v = preg_replace('/\s+en\s+[a-záéíóúñü\s]{3,}$/iu', '', $kw);
+    $v = trim(preg_replace('/\s+/', ' ', (string)$v));
+
+    // si quedó igual, corta a 2-3 palabras
+    if ($v === '' || $v === $kw) {
+        $tokens = preg_split('/\s+/u', $kw);
+        $tokens = array_values(array_filter($tokens, fn($t) => mb_strlen($t) >= 3));
+        if (count($tokens) >= 3) $v = trim($tokens[0].' '.$tokens[1].' '.$tokens[2]);
+        elseif (count($tokens) >= 2) $v = trim($tokens[0].' '.$tokens[1]);
+        else $v = null;
+    }
+
+    if (!$v || mb_strlen($v) < 4) return null;
+    if ($this->normalizeKey($v) === $this->normalizeKey($kw)) return null;
+
+    return $v;
+}
+
+private function metricsVacias(array $km): bool
+{
+    foreach (['volume','difficulty','organic_ctr','priority'] as $f) {
+        if (array_key_exists($f, $km) && $km[$f] !== null) return false;
+    }
+    return true;
+}
+
 }
