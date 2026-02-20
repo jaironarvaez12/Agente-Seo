@@ -98,6 +98,32 @@
                     Enter o coma para agregar. Click en × para quitar.
                   </small>
                 </div>
+                <div class="mt-3 p-16 radius-8 bg-warning-focus border border-warning-main">
+  <div class="d-flex align-items-start gap-2">
+    <iconify-icon icon="mdi:lightbulb-on-outline" class="icon text-xl"></iconify-icon>
+    <div>
+      <div class="fw-semibold mb-1">Tips para elegir palabras clave</div>
+
+      <ul class="mb-0 text-sm">
+        <li><strong>Mejor:</strong> usa frases específicas (2–5 palabras). Ej: <em>“abogado laboral en Bogotá”</em>, <em>“diseño web para restaurantes”</em>.</li>
+        <li><strong>Incluye intención:</strong> agrega palabras como <em>precio</em>, <em>cotización</em>, <em>cerca de mí</em>, <em>servicio</em>, <em>contratar</em>.</li>
+        <li><strong>Usa ubicación</strong> si el negocio es local: ciudad, barrio, país. Ej: <em>“clínica dental Medellín”</em>.</li>
+        <li><strong>Evita genéricas:</strong> <em>“marketing”</em>, <em>“SEO”</em>, <em>“páginas web”</em> solas compiten demasiado.</li>
+        <li><strong>No repitas variaciones iguales:</strong> si ya tienes <em>“diseño web”</em>, no agregues 10 cambios mínimos; mejor agrega otra intención (<em>precio</em>, <em>paquetes</em>, <em>ejemplos</em>).</li>
+        <li><strong>Evita marcas ajenas</strong> si no tienes permiso (puede causar problemas en anuncios/SEO).</li>
+        <li><strong>Calidad &gt; cantidad:</strong> 5–15 palabras clave bien elegidas rinden mejor que 50 sin foco.</li>
+      </ul>
+
+      <div class="text-sm mt-2">
+        <strong>Ejemplos:</strong>
+        <span class="badge bg-info-focus text-info-600 border border-info-main me-1">“página web precio fijo”</span>
+        <span class="badge bg-info-focus text-info-600 border border-info-main me-1">“agencia SEO en Cali”</span>
+        <span class="badge bg-info-focus text-info-600 border border-info-main">“landing page para psicólogos”</span>
+      </div>
+    </div>
+  </div>
+</div>
+
 
                 <div class="d-flex align-items-center justify-content-center gap-3 mt-4">
                   <button type="button"

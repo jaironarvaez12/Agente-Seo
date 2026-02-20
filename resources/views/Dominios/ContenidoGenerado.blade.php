@@ -146,11 +146,8 @@
             
 
                     {{-- Publicar --}}
-                    <form method="POST"
-                          action="{{ route('dominios.contenido.publicar', [$IdDominio, $it->id_dominio_contenido_detalle]) }}"
-                          class="m-0 form-publish">
-                      @csrf
-
+                    <form method="POST" action="{{ route('dominios.contenido.publicar', [$IdDominio, $it->id_dominio_contenido_detalle]) }}"class="m-0 form-publish">
+                       @csrf
                       <button type="submit"
                         class="bg-success-focus text-success-600 bg-hover-success-200 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle border-0"
                         title="Publicar"
@@ -158,6 +155,7 @@
                         <iconify-icon icon="mdi:publish" class="menu-icon"></iconify-icon>
                       </button>
                     </form>
+                    {{-- Programar --}}
                     <button type="button"
                       class="bg-info-focus text-info-600 bg-hover-info-200 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle border-0 btn-schedule"
                       title="Programar"
@@ -166,6 +164,22 @@
                       {{ in_array($it->estatus, ['publicado','en_proceso','programado']) ? 'disabled' : '' }}>
                       <iconify-icon icon="mdi:calendar-clock" class="menu-icon"></iconify-icon>
                     </button>
+
+
+                     @php
+                        $res = null;
+
+                        if (!empty($it->resultado_backlinks)) {
+                          $res = is_array($it->resultado_backlinks)
+                            ? $it->resultado_backlinks
+                            : json_decode($it->resultado_backlinks, true);
+                        }
+
+                        $r0 = $res['data']['results'][0] ?? null;
+                        $pubs = $r0['published_urls'] ?? [];
+                        $fails = $r0['failed_platforms'] ?? [];
+                        $sum = $r0['summary'] ?? null;
+                      @endphp
                     {{-- ESPEREAR CONFIRMACION DE ALEXANDER --}}
                     {{-- <form method="POST" action="{{ route('dominios.contenido.generar_backlinks', [$IdDominio, $it->id_dominio_contenido_detalle]) }}"
                       class="m-0">
@@ -176,8 +190,22 @@
                         {{ ($it->estatus !== 'publicado' || empty($it->wp_link) || ($it->estatus_backlinks ?? '') === 'en_proceso') ? 'disabled' : '' }}>
                         <iconify-icon icon="mdi:link-variant"></iconify-icon>
                       </button>
-                    </form> --}}
+                     
 
+      
+                    </form>
+                 
+                  <button type="button"
+                    class="bg-info-focus text-info-600 bg-hover-info-200 fw-medium w-40-px h-40-px d-flex justify-content-center align-items-center rounded-circle border-0 btn-view-backlinks"
+                    title="Ver backlinks"
+                    data-title="{{ e($it->title ?: '(Sin título)') }}"
+                    data-summary='@json($sum)'
+                    data-published='@json($pubs)'
+                    data-failed='@json($fails)'
+                    {{ empty($it->resultado_backlinks) ? 'disabled' : '' }}>
+                    <iconify-icon icon="mdi:link-box-variant" class="menu-icon"></iconify-icon>
+                  </button>
+ --}}
 
                   </div>
                 </td>
@@ -217,6 +245,13 @@
     </div>
   </div>
 </div>
+
+
+
+
+
+
+
 @endsection
 
 @section('scripts')
@@ -334,6 +369,9 @@ scheduleForm.addEventListener('submit', (e) => {
   const btn = scheduleForm.querySelector('button[type="submit"]');
   if (btn) btn.disabled = true;
 });
+
+
+
 });
 </script>
 <script>
@@ -379,4 +417,8 @@ scheduleForm.addEventListener('submit', (e) => {
     </form>
   </div>
 </div>
+
+
+
+
 @endsection

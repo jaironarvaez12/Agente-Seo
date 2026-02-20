@@ -231,15 +231,17 @@ Route::get('/debug/desactivar-lista', function (LicenseService $licenses) {
 
     Route::post('/dominios/{idDominio}/auto-generacion/ejecutar-ahora', [App\Http\Controllers\DominiosAutoGeneracionController::class, 'ejecutarAhora'])
         ->name('dominios.auto_generacion.ejecutar_ahora');
-    //DASHBAORD
-    //dashboard Seo
+    
 
     //rutas backlinks
     Route::post('/dominios/{dominio}/contenido/{detalle}/generar-backlinks',[App\Http\Controllers\DominiosController::class, 'generarBacklinks'])->name('dominios.contenido.generar_backlinks');
 
-
-
-
+    //dominios backlinks
+    Route::get('backlinkdominios', [App\Http\Controllers\BacklinkController::class, 'index'])->name('backlinkdominios');
+    Route::get('backlinkcontenido/{id_dominio}', [App\Http\Controllers\BacklinkController::class, 'ver'])->name('backlinkcontenido');
+    Route::get('backlinksgenerados/{id_dominio}', [App\Http\Controllers\BacklinkController::class, 'VerBacklinksGenerados'])->name('backlinksgenerados');
+    //DASHBAORD
+    //dashboard Seo
     Route::get('dashboardseo', [App\Http\Controllers\DashboardController::class, 'DashboardSeo'])->name('dashboardseo');
 
     //modificar prompt

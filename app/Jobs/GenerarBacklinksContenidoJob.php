@@ -15,7 +15,7 @@ class GenerarBacklinksContenidoJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 240;
+    public int $timeout = 1200;
 
     public function __construct(public int $idDetalle) {}
 
@@ -75,20 +75,48 @@ class GenerarBacklinksContenidoJob implements ShouldQueue
 
         $respuesta = $servicio->procesarArticulo($payload);
 
-        // ✅ Guardar respuesta completa + fecha
-        $it->estatus_backlinks = 'listo';
-        $it->resultado_backlinks = $respuesta;
+        // si aplicaste la opción donde el servicio devuelve status+json:
+        $res = $respuesta['json'] ?? $respuesta;
+
+        // summary
+        $result0 = $res['data']['results'][0] ?? null;
+        $failed  = (int)($result0['summary']['failed'] ?? 0);
+        $estatus = ($failed > 0) ? 'parcial' : 'listo';
+
+        // ✅ estado actual del detalle (lo último)
+        $it->estatus_backlinks = $estatus;
+        $it->resultado_backlinks = $res; // opcional, “último resultado”
         $it->fecha_backlinks = now();
+        $it->error_backlinks = null;
         $it->save();
+
+        // ✅ historial (nuevo registro)
+        \App\Models\BacklinksRun::create([
+            'id_dominio' => (int) $it->id_dominio,
+            'id_dominio_contenido_detalle' => (int) $it->id_dominio_contenido_detalle,
+            'estatus' => $estatus,
+            'respuesta' => $res,
+            'error' => null,
+        ]);
+
     }
 
     public function failed(\Throwable $e): void
     {
         $it = Dominios_Contenido_DetallesModel::find($this->idDetalle);
+
         if ($it) {
             $it->estatus_backlinks = 'error';
             $it->error_backlinks = $e->getMessage();
             $it->save();
+
+            \App\Models\BacklinksRun::create([
+                'id_dominio' => (int) $it->id_dominio,
+                'id_dominio_contenido_detalle' => (int) $it->id_dominio_contenido_detalle,
+                'estatus' => 'error',
+                'respuesta' => null,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 }

@@ -72,7 +72,11 @@ class Dominios_Contenido_DetallesModel extends Model
         'fecha_backlinks',
     ];
    
-
+    public function backlinksRuns()
+    {
+        return $this->hasMany(\App\Models\BacklinksRun::class, 'id_dominio_contenido_detalle', 'id_dominio_contenido_detalle')
+            ->orderByDesc('created_at');
+    }
 
 
      public static function ContenidoGenerado($IdUsuario,$esAdmin)
@@ -89,4 +93,6 @@ class Dominios_Contenido_DetallesModel extends Model
 
     return (int) $q->count('dcd.id_dominio_contenido_detalle');
     }
+
+
 }

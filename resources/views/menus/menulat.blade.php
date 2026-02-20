@@ -224,7 +224,10 @@
           {{-- <li>
             <a href="{{ route('usuarios.index') }}"><i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i> Lista de Usuarios</a>
           </li> --}}
-         
+         <a href="{{ route('backlinkdominios') }}">
+                  <i class="ri-circle-fill circle-icon text-primary-600 w-auto"></i>
+                  Lista de Dominios
+                </a>
          
          
         </ul>

@@ -775,7 +775,7 @@ public function verWp($id, WordpressService $wp)
 
 
 
-    public function Generador(string $IdDominio, \App\Services\ServicioGenerarDominio $servicioGenerador)
+    public function Generador(string $IdDominio, ServicioGenerarDominio $servicioGenerador)
 {
     $usuario = auth()->user();
     if (!$usuario) return back()->withError('Debes iniciar sesión.');
@@ -1610,7 +1610,7 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
 // backlinks
     public function generarBacklinks($dominio, int $detalle): RedirectResponse
     {
-        dd('SI LLEGÓ AL CONTROLADOR', $dominio, $detalle);
+       // dd('SI LLEGÓ AL CONTROLADOR', $dominio, $detalle);
         $it = Dominios_Contenido_DetallesModel::findOrFail($detalle);
 
         // solo si ya está publicado y tiene URL
@@ -1629,9 +1629,13 @@ public function programar(Request $request, $dominio, int $detalle): RedirectRes
 
         \App\Jobs\GenerarBacklinksContenidoJob::dispatch($it->id_dominio_contenido_detalle);
 
-        return back()->with('exito', 'Backlinks en proceso.');
+          return back()->withSuccess('Backlinks en proceso.');
     }   
 
+
+
+
+///fin backlinks
     public function CargarPlantillas()
     {
         $usuario = auth()->user();
